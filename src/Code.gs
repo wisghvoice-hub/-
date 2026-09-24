@@ -159,6 +159,7 @@ function onEdit(e) {
           const hist = ss.getSheetByName("会話履歴/新規");
           if (hist) appendHistory_(hist, company, memo(), "");
           countUp("架電記録/新規", 2); // B+1
+          markCalledToday_(company, ymd); // 営業先リスト/新規で薄紫にする
           const sales = ss.getSheetByName("営業先リスト/新規");
           const r = sales ? findRowInColA_(sales, company) : 0;
           if (r) sales.getRange(r, 9).setValue(ymd); // I列
@@ -196,17 +197,35 @@ function onEdit(e) {
         const isNew = sheetName === "営業先リスト/新規";
         const logSheet = ss.getSheetByName(isNew ? "架電記録/新規" : "架電記録/現S");
         const histName = isNew ? "会話履歴/新規" : "会話履歴/現S";
+        // 新規：E/F/H 列の入力＝今日電話した → 記録して行を薄紫（G列に値があれば黄緑）に
+        const markCalled = () => {
+          if (!isNew) return;
+          markCalledToday_(sheet.getRange(row, 1).getDisplayValue(), ymd);
+          updateRowColor(sheet, row, sheet.getLastColumn());
+        };
 
         switch (col) {
-          case 7: // G列：予定の有無で行色更新
-            updateRowColor(sheet, row, sheet.getLastColumn());
+          case 7: { // G列：予定の有無で行色更新
+            if (!isNew) {
+              updateRowColor(sheet, row, sheet.getLastColumn());
+              return;
+            }
+            // 新規：G列に値あり＝黄緑、空で今日電話済み＝薄紫、空で未電話＝黄緑だったときだけ白に戻す
+            const name = String(sheet.getRange(row, 1).getDisplayValue() || "").trim();
+            if (filled || getCalledToday_(ymd).has(name)) updateRowColor(sheet, row, sheet.getLastColumn());
+            else {
+              const rng = sheet.getRange(row, 1, 1, sheet.getLastColumn());
+              if (String(rng.getBackground() || "").toUpperCase() === "#ADFF2F") rng.setBackground(null);
+            }
             return;
+          }
 
           case 6: // F列：J に日付＋架電 C+1＋クリア（新規は L もクリア）
             if (isNew) sheet.getRange(row, 12).clearContent();
             sheet.getRange(row, 10).setValue(ymd); // J
             if (logSheet) updateCallLog(logSheet, ymd, 3); // C+1
             sheet.getRange(row, 6).clearContent();
+            markCalled();
             return;
 
           case 5: { // E列：会話追記＋I更新＋B+1＋B1回転＋（新規）時間帯カウンタ＋Sローテ
@@ -217,6 +236,7 @@ function onEdit(e) {
             if (newHistRow) createHyperlinks(sheet, hist, row, newHistRow, company);
 
             sheet.getRange(row, 9).setValue(ymd); // I：最終接触日
+            if (isNew) markCalledToday_(company, ymd);
             updateRowColor(sheet, row, sheet.getLastColumn());
             sheet.getRange(row, 5).clearContent();
             if (logSheet) updateCallLog(logSheet, ymd, 2); // B+1
@@ -243,6 +263,7 @@ function onEdit(e) {
             const statusCell = sheet.getRange(row, 14);
             statusCell.setValue(bumpCounterText_(getOrInitStatus_(statusCell.getValue()), "アポイント"));
             sheet.getRange(row, 8).clearContent();
+            markCalled();
             return;
           }
 
@@ -1383,8 +1404,7 @@ function updateAllSheetsAndResetColors_Safe() {
   // 2) データ取得 B～D クリア（内容のみ）
   clearDataSheetColumns();
 
-  // 3) ステータス別の背景色ハイライト（新規／現S）
-  highlightCellsByStatus_Param("営業先リスト/新規");
+  // 3) ステータス別の背景色ハイライト（現S）
   highlightCellsByStatus_Param("営業先リスト/現S");
 
   // 4) 現S：J列が今月以外 かつ B列≠「×」の行を薄黄
@@ -1393,6 +1413,9 @@ function updateAllSheetsAndResetColors_Safe() {
   // 5) ステータス集計・スコア計算
   countStatusSummary();
   calcSalesPriorityScore();
+
+  // 5.5) 新規：並び替えの後に色（今日電話した＝薄紫／今日かけるべき＝オレンジ／それ以外＝白）
+  paintShinkiByPriority_(ss);
 
   // 6) 掲載開始顧客：色塗りを一括適用（ラベンダー保護・外部for赤・優先整列まで）
   colorKeisaiRowsUnified_({
@@ -1843,18 +1866,8 @@ function calcSalesPriorityScore() {
     const data = sheet.getRange(2, 1, lastRow - 1, width).getValues();
     const tz = ss.getSpreadsheetTimeZone();
     const now = new Date();
-    const today = salesPriorityDay_(now, tz);
-    const hour = Number(Utilities.formatDate(now, tz, 'H')) + Number(Utilities.formatDate(now, tz, 'm')) / 60;
     const historySheet = ss.getSheetByName('会話履歴/新規');
-    const histories = Object.create(null);
-    if (historySheet && historySheet.getLastRow() > 1) {
-      historySheet.getRange(2, 1, historySheet.getLastRow() - 1, 3).getValues().forEach(r => {
-        const name = String(r[0] || '').trim();
-        const h = salesPriorityLatestHistory_(r[2], tz);
-        if (name && h && (!histories[name] || h.stamp >= histories[name].stamp)) histories[name] = h;
-      });
-    }
-    const results = data.map(row => salesPriorityRow_(row, { today: today, hour: hour, tz: tz, history: histories[String(row[0] || '').trim()] }));
+    const results = salesPriorityResults_(ss, data, now);
     // 内容・数式・書式を保ったバックアップ。旧方式の全行setValuesは使用しない。
     backupSheet_(ss, sheet, '_backup_営業先リスト新規');
     sheet.getRange(2, 17, results.length, 1).setValues(results.map(r => [r.score]));
@@ -1869,6 +1882,67 @@ function calcSalesPriorityScore() {
     console.log('優先順位更新完了: ' + results.length + '行。Q列メモに理由を記録。');
   } finally {
     lock.releaseLock();
+  }
+}
+
+// 営業先リスト/新規の各行の点数・理由・今日かけるべきか（calcSalesPriorityScore と色塗りで共通）
+function salesPriorityResults_(ss, data, now) {
+  const tz = ss.getSpreadsheetTimeZone();
+  const today = salesPriorityDay_(now, tz);
+  const hour = Number(Utilities.formatDate(now, tz, 'H')) + Number(Utilities.formatDate(now, tz, 'm')) / 60;
+  const historySheet = ss.getSheetByName('会話履歴/新規');
+  const histories = Object.create(null);
+  if (historySheet && historySheet.getLastRow() > 1) {
+    historySheet.getRange(2, 1, historySheet.getLastRow() - 1, 3).getValues().forEach(r => {
+      const name = String(r[0] || '').trim();
+      const h = salesPriorityLatestHistory_(r[2], tz);
+      if (name && h && (!histories[name] || h.stamp >= histories[name].stamp)) histories[name] = h;
+    });
+  }
+  return data.map(row => salesPriorityRow_(row, { today: today, hour: hour, tz: tz, history: histories[String(row[0] || '').trim()] }));
+}
+
+// 営業先リスト/新規の行全体を塗る：今日電話した＝薄紫（G列に数字があれば黄緑）／今日かけるべき＝オレンジ／それ以外＝白
+function paintShinkiByPriority_(ss) {
+  const sh = ss.getSheetByName('営業先リスト/新規');
+  if (!sh || sh.getLastRow() < 2) return;
+  const lastCol = sh.getLastColumn();
+  const n = sh.getLastRow() - 1;
+  const data = sh.getRange(2, 1, n, Math.max(22, lastCol)).getValues();
+  const results = salesPriorityResults_(ss, data, new Date());
+  const called = getCalledToday_(Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy/MM/dd'));
+  const bgs = data.map((row, i) => {
+    const g = row[6];
+    const color = called.has(String(row[0] || '').trim())
+      ? (g !== '' && !isNaN(g) ? '#ADFF2F' : '#E6E6FA')
+      : results[i].due ? '#FFA500' : null;
+    return Array(lastCol).fill(color);
+  });
+  sh.getRange(2, 1, n, lastCol).setBackgrounds(bgs);
+}
+
+// 「今日電話した」社名の記録（スクリプトのプロパティに日付ごとに保存。前日以前の分は自動で消す）
+function getCalledToday_(ymd) {
+  const raw = PropertiesService.getScriptProperties().getProperty('CALLED_' + ymd);
+  return new Set(raw ? JSON.parse(raw) : []);
+}
+// 記録に失敗しても入力時の他の処理は止めない
+function markCalledToday_(name, ymd) {
+  const key = String(name || '').trim();
+  if (!key) return;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const raw = props.getProperty('CALLED_' + ymd);
+    if (!raw) {
+      Object.keys(props.getProperties()).forEach(k => { if (k.indexOf('CALLED_') === 0) props.deleteProperty(k); });
+    }
+    const list = raw ? JSON.parse(raw) : [];
+    if (list.indexOf(key) < 0) {
+      list.push(key);
+      props.setProperty('CALLED_' + ymd, JSON.stringify(list));
+    }
+  } catch (err) {
+    console.error('今日電話した記録に失敗:', err);
   }
 }
 
@@ -1922,9 +1996,9 @@ function salesPriorityDay_(v, tz) {
 }
 
 function salesPriorityRow_(row, ctx) {
-  if (!String(row[0] || '').trim()) return { score: -20000, reason: '社名なし' };
+  if (!String(row[0] || '').trim()) return { score: -20000, reason: '社名なし', due: false };
   const p = salesPriorityPolicy_(row[11]);
-  if (p.stop) return { score: p.base, reason: p.label + '：架電対象外' };
+  if (p.stop) return { score: p.base, reason: p.label + '：架電対象外', due: false };
   let score = p.base;
   const reasons = [p.label + ' ' + p.base + '点'];
   const add = (n, label) => { score += n; reasons.push(label + ' ' + (n >= 0 ? '+' : '') + n); };
@@ -1934,19 +2008,21 @@ function salesPriorityRow_(row, ctx) {
   const callback = salesPriorityCallback_(history, ctx);
   if (callback && String(row[1] || '').trim() && ![i, j].some(d => d !== null && d > history.day && d <= ctx.today)) {
     const due = callback.day < ctx.today || (callback.day === ctx.today && ctx.hour >= callback.hour);
-    return { score: (due ? 1000 : -500) + p.base, reason: (due ? '再架電指示の日時到来：履歴を確認して架電' : '再架電指示の日時前：待機') + '\n最新履歴：' + callback.text };
+    return { score: (due ? 1000 : -500) + p.base, reason: (due ? '再架電指示の日時到来：履歴を確認して架電' : '再架電指示の日時前：待機') + '\n最新履歴：' + callback.text, due: due };
   }
   const historyDay = history && history.day <= ctx.today ? history.day : null;
   const valid = [i, j, historyDay].filter(d => d !== null && d <= ctx.today);
   // I/Jの両方を見る。旧処理で片方だけが更新された行にも対応。
   const latest = valid.length ? Math.max.apply(null, valid) : null;
   if ([i, j].some(d => d !== null && d > ctx.today)) reasons.push('未来の接触日あり：要確認（加点なし）');
-  if (latest === ctx.today) return { score: -1000 + p.base, reason: '本日接触記録あり：通常の再架電は後回し。' + reasons[0] };
-  if (!String(row[1] || '').trim()) return { score: -2000 + p.base, reason: '電話番号なし：連絡先の確認が必要' };
+  if (latest === ctx.today) return { score: -1000 + p.base, reason: '本日接触記録あり：通常の再架電は後回し。' + reasons[0], due: false };
+  if (!String(row[1] || '').trim()) return { score: -2000 + p.base, reason: '電話番号なし：連絡先の確認が必要', due: false };
   const gap = latest === null ? null : ctx.today - latest;
   if (gap === 1) add(-40, '前日に接触');
   // 有効接触が記録されていればJ、なければ直近I/Jを再連絡間隔の基準にする。
   const baseDay = j !== null && j <= ctx.today ? j : latest;
+  // 今日かけるべき：接触日が未記録、または再連絡の目安日数が過ぎた（前日に接触した先は除く）
+  const due = gap !== 1 && (baseDay === null || ctx.today - baseDay >= p.interval);
   if (baseDay !== null) {
     const elapsed = ctx.today - baseDay;
     if (elapsed < p.interval) add(-30, '再連絡目安' + p.interval + '日未満');
@@ -1970,7 +2046,7 @@ function salesPriorityRow_(row, ctx) {
   // 予算をつくる人（T列）：話せている＞不明・未回答＞話せていない。再架電の約束（1000点台）より下に収める
   const budget = salesPriorityBudget_(row[19]);
   add(budget.offset, budget.label);
-  return { score: score, reason: reasons.join('\n') };
+  return { score: score, reason: reasons.join('\n'), due: due };
 }
 
 // 自由文からは「最新の記録にある、明確な再架電指示」だけを候補化する。
@@ -4668,8 +4744,9 @@ function runAllSafe_Final() {
     resetAndPaintTodayRows_(ss, "営業先リスト/新規");
     resetAndPaintTodayRows_(ss, "営業先リスト/現S");
 
-    // 期限超過オレンジ
-    highlightCellsByStatus_Param("営業先リスト/新規");
+    // 新規：今日電話した＝薄紫／今日かけるべき＝オレンジ（点数と同じ判断）／それ以外＝白
+    paintShinkiByPriority_(ss);
+    // 現S：期限超過オレンジ
     highlightCellsByStatus_Param("営業先リスト/現S");
 
     // 現Sの薄黄色
