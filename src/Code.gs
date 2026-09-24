@@ -3,538 +3,332 @@ const FIXED_HISTORY_LABEL = "Ⓒ1か月以内ニーズ有 × 選ばなそう";
 
 
 //================ onEdit ================
+// onEdit が反応するシート（それ以外の編集はすぐ終わる）
+const ONEDIT_SHEETS_ = new Set([
+  "掲載状況", "ホット", "掲載開始顧客", "新規ホット", "飛び込み先リスト", "メール管理",
+  "営業先リスト/新規", "営業先リスト/現S", "会話履歴/新規", "会話履歴/現S"
+]);
+
+// 営業先リスト E列入力のたびに S列へ順番に出すトーク
+const TALK_PHRASES_ = [
+  "「最近“新人どう育てるか”って話題多くて…御社ではどうされてます？」",
+  "「なんとなく現場の空気変わってきた気しません？御社って何か感じてます？」",
+  "「みなさん結構“判断迷ってること”あるみたいで…何か今、引っかかってることあります？」",
+  "「今後どうしていくか、結構みんな探ってる感じで…御社はどんな展望あります？」",
+  "「他社さん、今かなり動いてるみたいなんですけど…御社は落ち着いてます？」",
+  "「最近よく聞くのが“他社の動き”でして…ざっくりどんな感じかって耳にされたりしてます？」",
+  "「この前話してたことなんですけど、これってもう古いのかなって…御社だとどうです？」",
+  "「最近“社内でよく聞く言葉”ってあります？地味にキーワードで空気変わりますよね」",
+  "「そういえば最近“業界の噂”とか何か耳にされました？結構情報錯綜してて…」",
+  "「最近“あと一歩で決まりそうだった案件”とかありました？その温度感、すごく大事で…」"
+];
+
 function onEdit(e) {
   try {
-    const ss = e.source;
     const sheet = e.range.getSheet();
     const sheetName = sheet.getName();
+    if (!ONEDIT_SHEETS_.has(sheetName)) return;
+
+    const ss = e.source;
     const tz = Session.getScriptTimeZone();
     const now = new Date();
     const ymd = Utilities.formatDate(now, tz, "yyyy/MM/dd");
-    const mmdd = Utilities.formatDate(now, tz, "MM/dd");
-    const hh = Utilities.formatDate(now, tz, "HH時");
     const row = e.range.getRow();
     const col = e.range.getColumn();
     const value = e.range.getValue();
-    const lastCol = sheet.getLastColumn();
+    const filled = !(value === "" || value === 0 || value === null);
+    const checked = value === true || e.value === "TRUE";
+    const memo = () => `${ymd} ${Utilities.formatDate(now, tz, "HH時")} - ${value}`;
+    const clearCell = () => sheet.getRange(row, col).clearContent();
+    const countUp = (logName, c) => {
+      const log = ss.getSheetByName(logName);
+      if (log) updateCallLog(log, ymd, c);
+    };
 
-    function isEmpty(val) {
-      return val === "" || val === 0 || val === null;
-    }
+    switch (sheetName) {
 
-    //=== 掲載状況：J(10)入力 → 履歴/現S 追記＋営業先/現S I更新＋架電/現S B+1＋セルクリア
-    if (sheetName === "掲載状況" && col === 10 && !isEmpty(value)) {
-      const companyName = sheet.getRange(row, 2).getValue();
-      const targetText = `${ymd} ${hh} - ${value}`;
-      const historySheet = ss.getSheetByName("会話履歴/現S");
-
-      if (historySheet && companyName) {
-        const hit = historySheet
-          .getRange("A:A")
-          .createTextFinder(companyName)
-          .matchCase(true)
-          .matchEntireCell(true)
-          .findNext();
-
-        if (hit) {
-          const r = hit.getRow();
-          const c = historySheet.getRange(r, 3);
-          c.setValue((c.getValue() ? c.getValue() + "\n" : "") + targetText);
-          historySheet.getRange(r, 2).setValue(FIXED_HISTORY_LABEL);
-        } else {
-          historySheet.appendRow([companyName, FIXED_HISTORY_LABEL, targetText]);
+      case "掲載状況": {
+        //=== J(10)入力 → 会話履歴/現S 追記＋営業先/現S I更新＋架電/現S B+1＋セルクリア
+        if (col === 10 && filled) {
+          const company = sheet.getRange(row, 2).getValue();
+          const hist = ss.getSheetByName("会話履歴/現S");
+          if (hist && company) appendHistory_(hist, company, memo(), FIXED_HISTORY_LABEL);
+          const sales = ss.getSheetByName("営業先リスト/現S");
+          const r = sales && company ? findRowInColA_(sales, company) : 0;
+          if (r) sales.getRange(r, 9).setValue(ymd); // I列
+          countUp("架電記録/現S", 2); // B列+1
+          clearCell();
+          return;
         }
-      }
+        //=== G/H/I チェック → 同じ社名の行へ同期（押した列だけ）＋ H=TRUE で行灰色（条件付書式）
+        if (row > 1 && col >= 7 && col <= 9) {
+          const keyB = sheet.getRange(row, 2).getDisplayValue(); // B：社名
+          if (!keyB) return;
+          const n = sheet.getLastRow() - 1;
+          if (n <= 0) return;
+          const names = sheet.getRange(2, 2, n, 1).getDisplayValues();
+          const rng = sheet.getRange(2, col, n, 1);
+          const vals = rng.getValues();
+          names.forEach((b, i) => { if (b[0] === keyB) vals[i][0] = checked; });
+          rng.setValues(vals);
 
-      const salesSheet = ss.getSheetByName("営業先リスト/現S");
-      if (salesSheet && companyName) {
-        const m = salesSheet
-          .getRange("A:A")
-          .createTextFinder(companyName)
-          .matchCase(true)
-          .matchEntireCell(true)
-          .findNext();
-        if (m) salesSheet.getRange(m.getRow(), 9).setValue(ymd); // I列
-      }
-
-      const callLog = ss.getSheetByName("架電記録/現S");
-      if (callLog) updateCallLog(callLog, ymd, 2, tz); // B列+1
-
-      sheet.getRange(row, col).clearContent();
-      return;
-    }
-
-    //=== 掲載状況：G/H/I 列別同期（押した列だけ）＋ H=TRUE で行灰色（条件付書式）
-    if (sheetName === "掲載状況" && row > 1 && (col === 7 || col === 8 || col === 9)) {
-      const v = (e.range.getValue() === true || e.value === "TRUE");
-      const keyB = sheet.getRange(row, 2).getDisplayValue(); // B：社名
-      if (!keyB) return;
-
-      const lastRow = sheet.getLastRow();
-      const dataRowCount = Math.max(lastRow - 1, 0);
-      if (dataRowCount === 0) return;
-
-      const bVals = sheet.getRange(2, 2, dataRowCount, 1).getDisplayValues();
-      const colVals = sheet.getRange(2, col, dataRowCount, 1).getValues();
-
-      for (let i = 0; i < dataRowCount; i++) {
-        if (bVals[i][0] === keyB) colVals[i][0] = v;
-      }
-      sheet.getRange(2, col, dataRowCount, 1).setValues(colVals);
-
-      if (col === 8) ensureGreyRuleForKeisai_(sheet);
-
-      if (col === 8 && v) {
-        const nameA = String(sheet.getRange(row, 1).getDisplayValue() || "").trim();
-        const nameB = String(sheet.getRange(row, 2).getDisplayValue() || "").trim();
-        if (!setDateOnSalesByName_(ss, nameA, ymd)) setDateOnSalesByName_(ss, nameB, ymd);
-
-        const callLogSheet = ss.getSheetByName("架電記録/現S");
-        if (callLogSheet) updateCallLog(callLogSheet, ymd, 3, tz); // C列+1
-      }
-      return;
-    }
-
-    //=== ホット：J(10)入力 → 会話履歴/新規 追記（B固定）＋架電/新規 C+1＋セルクリア
-    if (sheetName === "ホット" && col === 10 && !isEmpty(value)) {
-      const companyName = sheet.getRange(row, 2).getValue();
-      if (!companyName) return;
-
-      const historySheet = ss.getSheetByName("会話履歴/新規");
-      const callLogSheet = ss.getSheetByName("架電記録/新規");
-      if (!historySheet || !callLogSheet) return;
-
-      const text = `${ymd} ${hh} - ${value}`;
-      const hit = historySheet
-        .getRange("A:A")
-        .createTextFinder(companyName)
-        .matchCase(true)
-        .matchEntireCell(true)
-        .findNext();
-
-      if (hit) {
-        const r = hit.getRow();
-        const c = historySheet.getRange(r, 3);
-        c.setValue((c.getValue() ? c.getValue() + "\n" : "") + text);
-        historySheet.getRange(r, 2).setValue(FIXED_HISTORY_LABEL);
-      } else {
-        historySheet.appendRow([companyName, FIXED_HISTORY_LABEL, text]);
-      }
-
-      updateCallLog(callLogSheet, ymd, 3, tz); // C+1
-      sheet.getRange(row, col).clearContent();
-      return;
-    }
-
-    //=== 掲載開始顧客：K(11)チェック → NGリスト追記＋行灰色
-    if (sheetName === "掲載開始顧客" && col === 11) {
-      const checked = (e.range.getValue() === true || e.value === "TRUE");
-      if (!checked || row === 1) return;
-
-      const toAppend = sheet.getRange(row, 1).getDisplayValue();
-      if (!toAppend) return;
-
-      const ngSheet = ss.getSheetByName("NGリスト") || ss.insertSheet("NGリスト");
-      if (ngSheet.getLastRow() === 0) ngSheet.getRange(1, 1).setValue("NGリスト");
-      ngSheet.appendRow([toAppend]);
-      sheet.getRange(row, 1, 1, lastCol).setBackground("#D3D3D3");
-      return;
-    }
-
-    //=== 新規ホット：H(8) / I(9)チェック → 色塗り＋営業先リスト/新規の日付更新
-    if (sheetName === "新規ホット" && row > 1 && (col === 8 || col === 9)) {
-      const checked = (e.range.getValue() === true || e.value === "TRUE" || e.value === 1);
-      if (!checked) return;
-
-      const LAVENDER = "#E6E6FA";
-      const GREY = "#D3D3D3";
-
-      const keyA = String(sheet.getRange(row, 1).getDisplayValue() || "").trim();
-      if (!keyA) return;
-
-      const lastRow = sheet.getLastRow();
-      const lastColHere = sheet.getLastColumn();
-      if (lastRow <= 1) return;
-
-      const dataRowCount = lastRow - 1;
-      const aVals = sheet.getRange(2, 1, dataRowCount, 1).getDisplayValues();
-      const bgs = sheet.getRange(2, 1, dataRowCount, lastColHere).getBackgrounds();
-
-      for (let i = 0; i < dataRowCount; i++) {
-        if (String(aVals[i][0]).trim() === keyA) {
           if (col === 8) {
-            const isGreyRow = bgs[i].some(colHex => String(colHex || "").toUpperCase() === GREY);
-            if (!isGreyRow) {
-              for (let j = 0; j < lastColHere; j++) {
-                bgs[i][j] = LAVENDER;
-              }
-            }
-          } else if (col === 9) {
-            for (let j = 0; j < lastColHere; j++) {
-              bgs[i][j] = GREY;
+            ensureGreyRuleForKeisai_(sheet);
+            if (checked) {
+              setGenSLastValidDate_(ss, [sheet.getRange(row, 1).getDisplayValue(), keyB], ymd);
+              countUp("架電記録/現S", 3); // C列+1
             }
           }
         }
+        return;
       }
 
-      sheet.getRange(2, 1, dataRowCount, lastColHere).setBackgrounds(bgs);
+      case "ホット": {
+        //=== J(10)入力 → 会話履歴/新規 追記（B固定）＋架電/新規 C+1＋セルクリア
+        if (col !== 10 || !filled) return;
+        const company = sheet.getRange(row, 2).getValue();
+        if (!company) return;
+        const hist = ss.getSheetByName("会話履歴/新規");
+        const log = ss.getSheetByName("架電記録/新規");
+        if (!hist || !log) return;
+        appendHistory_(hist, company, memo(), FIXED_HISTORY_LABEL);
+        updateCallLog(log, ymd, 3); // C+1
+        clearCell();
+        return;
+      }
 
-      const salesNew = ss.getSheetByName("営業先リスト/新規");
-      if (salesNew && keyA) {
-        const hit = salesNew
-          .getRange("A:A")
-          .createTextFinder(keyA)
-          .matchCase(true)
-          .matchEntireCell(true)
-          .findNext();
-
-        if (hit) {
-          const r = hit.getRow();
-
-          if (col === 8) {
-            salesNew.getRange(r, 9).setValue(ymd);  // I列
-          } else if (col === 9) {
-            salesNew.getRange(r, 9).setValue(ymd);  // I列
-            salesNew.getRange(r, 10).setValue(ymd); // J列
-          }
+      case "掲載開始顧客": {
+        //=== K(11)チェック → NGリスト追記＋行灰色
+        if (col === 11) {
+          if (!checked || row === 1) return;
+          const name = sheet.getRange(row, 1).getDisplayValue();
+          if (!name) return;
+          const ng = ss.getSheetByName("NGリスト") || ss.insertSheet("NGリスト");
+          if (ng.getLastRow() === 0) ng.getRange(1, 1).setValue("NGリスト");
+          ng.appendRow([name]);
+          paintRow_(sheet, row, "#D3D3D3");
+          return;
         }
-      }
-      return;
-    }
+        if (row === 1) return;
 
-    //=== 掲載開始顧客：J(10)入力 → Lへ蓄積＋履歴/新規 C追記＋架電/新規 B+1＋Jクリア＋行薄紫
-    if (sheetName === "掲載開始顧客" && col === 10 && !isEmpty(value) && row > 1) {
-      const companyName = sheet.getRange(row, 1).getDisplayValue();
-      if (!companyName) return;
-
-      const historySheet = ss.getSheetByName("会話履歴/新規");
-      const callLogSheet = ss.getSheetByName("架電記録/新規");
-      if (!historySheet || !callLogSheet) return;
-
-      const text = `${ymd} ${hh} - ${value}`;
-      const lCell = sheet.getRange(row, 12);
-      const prevL = String(lCell.getValue() || "").trim();
-      const joined = prevL ? (prevL + "\n" + text) : text;
-
-      lCell.setValue(joined).setWrap(true);
-
-      const hit = historySheet
-        .getRange("A:A")
-        .createTextFinder(companyName)
-        .matchCase(true)
-        .matchEntireCell(true)
-        .findNext();
-
-      if (hit) {
-        const r = hit.getRow();
-        const c = historySheet.getRange(r, 3);
-        c.setValue((c.getValue() ? c.getValue() + "\n" : "") + text);
-        historySheet.getRange(r, 2).setValue(FIXED_HISTORY_LABEL);
-      } else {
-        historySheet.appendRow([companyName, FIXED_HISTORY_LABEL, text]);
-      }
-
-      updateCallLog(callLogSheet, ymd, 2, tz); // B+1
-      sheet.getRange(row, col).clearContent();
-      sheet.getRange(row, 1, 1, lastCol).setBackground("#E6E6FA");
-      return;
-    }
-
-    //=== 掲載開始顧客：F(6)チェック → TRUE:緑 / FALSE:薄紫
-    if (sheetName === "掲載開始顧客" && col === 6 && row > 1) {
-      const checked = (e.range.getValue() === true || e.value === "TRUE" || e.value === 1);
-      setRowColorByFlag_(sheet, row, lastCol, checked);
-      return;
-    }
-
-    //=== 掲載開始顧客：H(8)入力 → 架電記録/新規 のD列+1
-    if (sheetName === "掲載開始顧客" && col === 8 && row > 1 && !isEmpty(value)) {
-      const callLogSheet = ss.getSheetByName("架電記録/新規");
-      if (callLogSheet) updateCallLog(callLogSheet, ymd, 4, tz); // D列+1
-      return;
-    }
-
-    //=== 飛び込み先リスト：K(11)入力でMM/ddセット
-    if (sheetName === "飛び込み先リスト") {
-      if (col === 11 && !isEmpty(value)) sheet.getRange(row, 11).setValue(mmdd);
-      return;
-    }
-
-    //=== メール管理：C入力 → 行色変更＆該当ログB/C+1
-    if (sheetName === "メール管理" && col === 3 && row !== 1 && !isEmpty(value)) {
-      sheet.getRange(row, 3).setValue(mmdd);
-      const cell = sheet.getRange(row, 3);
-      const bgHex = (cell.getBackground() || "").toUpperCase();
-      const rowRange = sheet.getRange(row, 1, 1, lastCol);
-
-      if (bgHex === "#DC143C") rowRange.setBackground("#FFC0CB");
-      else if (bgHex === "#5B9BD5") rowRange.setBackground("#ADD8E6");
-
-      if (["#FFC0CB", "#DC143C", "#ADD8E6", "#5B9BD5"].includes(bgHex)) {
-        const logName = (bgHex === "#FFC0CB" || bgHex === "#DC143C") ? "架電記録/新規" : "架電記録/現S";
-        const callLog = ss.getSheetByName(logName);
-        if (callLog) {
-          updateCallLog(callLog, ymd, 2, tz); // B+1
-          updateCallLog(callLog, ymd, 3, tz); // C+1
-        }
-      }
-      return;
-    }
-
-    //=== 掲載開始顧客：G(7)チェック → 架電記録/新規 のC列+1
-    if (sheetName === "掲載開始顧客" && col === 7 && row > 1) {
-      const checked = (e.range.getValue() === true || e.value === "TRUE" || e.value === 1);
-      if (!checked) return;
-
-      const callLogSheet = ss.getSheetByName("架電記録/新規");
-      if (callLogSheet) updateCallLog(callLogSheet, ymd, 3, tz); // C列+1
-      return;
-    }
-
-    //=== 営業先リスト（新規/現S）
-    if (sheetName === "営業先リスト/新規" || sheetName === "営業先リスト/現S") {
-      if (row === 1 || (isEmpty(value) && col !== 7)) return;
-
-      const isNew = sheetName.includes("新規");
-      const companyName = sheet.getRange(row, 1).getValue();
-      const callLogName = isNew ? "架電記録/新規" : "架電記録/現S";
-      const historyName = isNew ? "会話履歴/新規" : "会話履歴/現S";
-      const callLogSheet = ss.getSheetByName(callLogName);
-      const historySheet = ss.getSheetByName(historyName);
-
-      // G列：予定の有無で行色更新
-      if (col === 7) updateRowColor(sheet, row, lastCol);
-
-      // F列：架電カウント（C=3）+1 → Jに日付 → クリア ＊新規ならLをクリア
-      if (col === 6 && !isEmpty(value)) {
-        if (isNew) {
+        //=== J(10)入力 → Lへ蓄積＋会話履歴/新規 追記＋架電/新規 B+1＋Jクリア＋行薄紫
+        if (col === 10 && filled) {
+          const company = sheet.getRange(row, 1).getDisplayValue();
+          if (!company) return;
+          const hist = ss.getSheetByName("会話履歴/新規");
+          const log = ss.getSheetByName("架電記録/新規");
+          if (!hist || !log) return;
+          const text = memo();
           const lCell = sheet.getRange(row, 12);
-          lCell.clearContent();
+          const prevL = String(lCell.getValue() || "").trim();
+          lCell.setValue(prevL ? prevL + "\n" + text : text).setWrap(true);
+          appendHistory_(hist, company, text, FIXED_HISTORY_LABEL);
+          updateCallLog(log, ymd, 2); // B+1
+          clearCell();
+          paintRow_(sheet, row, "#E6E6FA");
         }
-        sheet.getRange(row, 10).setValue(ymd); // J
-        if (callLogSheet) updateCallLog(callLogSheet, ymd, 3, tz); // C+1
-        sheet.getRange(row, 6).clearContent();
+        //=== F(6)チェック → TRUE:緑 / FALSE:薄紫
+        else if (col === 6) setRowColorByFlag_(sheet, row, sheet.getLastColumn(), checked);
+        //=== G(7)チェック → 架電記録/新規 C列+1
+        else if (col === 7 && checked) countUp("架電記録/新規", 3);
+        //=== H(8)入力 → 架電記録/新規 D列+1
+        else if (col === 8 && filled) countUp("架電記録/新規", 4);
+        //=== I(9)入力 → 営業先リスト/新規へ転記＋会話履歴へ追記＋相互リンク＋行グレー化
+        else if (col === 9 && value !== "") upsertShinkiAndHistoryFromKeisai_(ss, sheet, row, ymd, tz);
         return;
       }
 
-      // E列：会話追記＋I更新＋B+1＋B1回転＋（新規）時間帯カウンタ＋Sローテ
-      if (col === 5 && !isEmpty(value)) {
-        const text = `${ymd} ${hh} - ${value}`;
-        const hit = historySheet
-          .getRange("A:A")
-          .createTextFinder(companyName)
-          .matchCase(true)
-          .matchEntireCell(true)
-          .findNext();
+      case "新規ホット": {
+        //=== H(8) / I(9)チェック → 同じ社名の行を色塗り＋営業先リスト/新規の日付更新
+        if (row > 1 && (col === 8 || col === 9)) {
+          if (!checked) return;
+          const keyA = String(sheet.getRange(row, 1).getDisplayValue() || "").trim();
+          if (!keyA) return;
+          const n = sheet.getLastRow() - 1;
+          if (n <= 0) return;
+          const names = sheet.getRange(2, 1, n, 1).getDisplayValues();
+          const rng = sheet.getRange(2, 1, n, sheet.getLastColumn());
+          const bgs = rng.getBackgrounds();
+          names.forEach((a, i) => {
+            if (String(a[0]).trim() !== keyA) return;
+            if (col === 9) bgs[i].fill("#D3D3D3");
+            else if (!bgs[i].some(c => String(c || "").toUpperCase() === "#D3D3D3")) bgs[i].fill("#E6E6FA");
+          });
+          rng.setBackgrounds(bgs);
 
-        if (hit) {
-          const targetRow = hit.getRow();
-          const c = historySheet.getRange(targetRow, 3);
-          c.setValue((c.getValue() ? c.getValue() + "\n" : "") + text);
-          historySheet.getRange(targetRow, 2).setValue(FIXED_HISTORY_LABEL);
-        } else {
-          historySheet.appendRow([companyName, FIXED_HISTORY_LABEL, text]);
-          const newRow = historySheet.getLastRow();
-          createHyperlinks(sheet, historySheet, row, newRow, companyName);
+          const sales = ss.getSheetByName("営業先リスト/新規");
+          const r = sales ? findRowInColA_(sales, keyA) : 0;
+          if (r) sales.getRange(r, 9, 1, col === 9 ? 2 : 1).setValue(ymd); // Hチェック→I列 / Iチェック→I列とJ列
+          return;
         }
+        //=== G(7)チェック → TRUE:緑 / FALSE:薄紫
+        if (col === 7 && row > 1) {
+          setRowColorByFlag_(sheet, row, sheet.getLastColumn(), checked);
+          return;
+        }
+        //=== J(10)入力 → 会話履歴/新規へ追記（B固定なし）＋架電記録/新規 B+1＋営業先リスト/新規 I更新＋セルクリア＋行薄紫
+        if (col === 10 && filled) {
+          const company = String(sheet.getRange(row, 1).getDisplayValue() || "").trim();
+          if (!company) return;
+          const hist = ss.getSheetByName("会話履歴/新規");
+          if (hist) appendHistory_(hist, company, memo(), "");
+          countUp("架電記録/新規", 2); // B+1
+          const sales = ss.getSheetByName("営業先リスト/新規");
+          const r = sales ? findRowInColA_(sales, company) : 0;
+          if (r) sales.getRange(r, 9).setValue(ymd); // I列
+          clearCell();
+          paintRow_(sheet, row, "#E6E6FA");
+        }
+        return;
+      }
 
-        sheet.getRange(row, 9).setValue(ymd); // I：最終接触日
-        updateRowColor(sheet, row, lastCol);
-        sheet.getRange(row, 5).clearContent();
+      case "飛び込み先リスト": {
+        //=== K(11)入力でMM/ddセット
+        if (col === 11 && filled) sheet.getRange(row, 11).setValue(Utilities.formatDate(now, tz, "MM/dd"));
+        return;
+      }
 
-        if (callLogSheet) updateCallLog(callLogSheet, ymd, 2, tz); // B+1
+      case "メール管理": {
+        //=== C入力 → 日付＋行色変更＋該当の架電記録 B/C+1
+        if (col !== 3 || row === 1 || !filled) return;
+        const cell = sheet.getRange(row, 3);
+        cell.setValue(Utilities.formatDate(now, tz, "MM/dd"));
+        const bgHex = (cell.getBackground() || "").toUpperCase();
+        if (bgHex === "#DC143C") paintRow_(sheet, row, "#FFC0CB");
+        else if (bgHex === "#5B9BD5") paintRow_(sheet, row, "#ADD8E6");
+        const logName = { "#FFC0CB": "架電記録/新規", "#DC143C": "架電記録/新規", "#ADD8E6": "架電記録/現S", "#5B9BD5": "架電記録/現S" }[bgHex];
+        if (logName) {
+          countUp(logName, 2); // B+1
+          countUp(logName, 3); // C+1
+        }
+        return;
+      }
 
-        const countCell = sheet.getRange("B1");
-        let currentCount = Number(countCell.getValue() || 0);
-        countCell.setValue((currentCount % 10) + 1);
+      case "営業先リスト/新規":
+      case "営業先リスト/現S": {
+        if (row === 1 || (!filled && col !== 7)) return;
+        const isNew = sheetName === "営業先リスト/新規";
+        const logSheet = ss.getSheetByName(isNew ? "架電記録/新規" : "架電記録/現S");
+        const histName = isNew ? "会話履歴/新規" : "会話履歴/現S";
 
-        if (isNew) {
-          const statusCell = sheet.getRange(row, 14);
-          const status0 = getOrInitStatus_(statusCell.getValue());
-          const hour = now.getHours();
-          const idx = hour < 12 ? 0 : hour < 15 ? 1 : hour < 17 ? 2 : -1;
+        switch (col) {
+          case 7: // G列：予定の有無で行色更新
+            updateRowColor(sheet, row, sheet.getLastColumn());
+            return;
 
-          let updated = status0;
-          if (idx >= 0) {
-            const labels = ["午前中", "13-15時", "15-17時"];
-            updated = bumpCounterText_(status0, labels[idx]);
+          case 6: // F列：J に日付＋架電 C+1＋クリア（新規は L もクリア）
+            if (isNew) sheet.getRange(row, 12).clearContent();
+            sheet.getRange(row, 10).setValue(ymd); // J
+            if (logSheet) updateCallLog(logSheet, ymd, 3); // C+1
+            sheet.getRange(row, 6).clearContent();
+            return;
+
+          case 5: { // E列：会話追記＋I更新＋B+1＋B1回転＋（新規）時間帯カウンタ＋Sローテ
+            const hist = ss.getSheetByName(histName);
+            if (!hist) return;
+            const company = sheet.getRange(row, 1).getValue();
+            const newHistRow = appendHistory_(hist, company, memo(), FIXED_HISTORY_LABEL);
+            if (newHistRow) createHyperlinks(sheet, hist, row, newHistRow, company);
+
+            sheet.getRange(row, 9).setValue(ymd); // I：最終接触日
+            updateRowColor(sheet, row, sheet.getLastColumn());
+            sheet.getRange(row, 5).clearContent();
+            if (logSheet) updateCallLog(logSheet, ymd, 2); // B+1
+
+            const countCell = sheet.getRange("B1");
+            countCell.setValue((Number(countCell.getValue() || 0) % 10) + 1);
+
+            if (isNew) {
+              const statusCell = sheet.getRange(row, 14);
+              const status0 = getOrInitStatus_(statusCell.getValue());
+              const hour = now.getHours();
+              const label = hour < 12 ? "午前中" : hour < 15 ? "13-15時" : hour < 17 ? "15-17時" : "";
+              statusCell.setValue(label ? bumpCounterText_(status0, label) : status0);
+            }
+
+            const sCell = sheet.getRange(row, 19);
+            const idx = TALK_PHRASES_.indexOf(sCell.getValue());
+            sCell.setValue(TALK_PHRASES_[idx < 0 ? 0 : (idx + 1) % TALK_PHRASES_.length]);
+            return;
           }
-          statusCell.setValue(updated);
+
+          case 8: { // H列：架電 D+1＋アポイント回数+1＋クリア
+            if (logSheet) updateCallLog(logSheet, ymd, 4);
+            const statusCell = sheet.getRange(row, 14);
+            statusCell.setValue(bumpCounterText_(getOrInitStatus_(statusCell.getValue()), "アポイント"));
+            sheet.getRange(row, 8).clearContent();
+            return;
+          }
+
+          case 13: { // M列：今Qヨミへ行コピー＆最新会話をEへ
+            const yomi = ss.getSheetByName("今Qヨミ");
+            if (yomi) {
+              const targetRow = yomi.getLastRow() + 1;
+              sheet.getRange(row, 1, 1, sheet.getLastColumn()).copyTo(yomi.getRange(targetRow, 1), { contentsOnly: false });
+              const company = sheet.getRange(row, 1).getValue();
+              yomi.getRange(targetRow, 5).setValue(getLatestConversation(ss.getSheetByName(histName), company));
+            }
+            sheet.getRange(row, 13).clearContent();
+            return;
+          }
         }
-
-        const phrases = [
-          "「最近“新人どう育てるか”って話題多くて…御社ではどうされてます？」",
-          "「なんとなく現場の空気変わってきた気しません？御社って何か感じてます？」",
-          "「みなさん結構“判断迷ってること”あるみたいで…何か今、引っかかってることあります？」",
-          "「今後どうしていくか、結構みんな探ってる感じで…御社はどんな展望あります？」",
-          "「他社さん、今かなり動いてるみたいなんですけど…御社は落ち着いてます？」",
-          "「最近よく聞くのが“他社の動き”でして…ざっくりどんな感じかって耳にされたりしてます？」",
-          "「この前話してたことなんですけど、これってもう古いのかなって…御社だとどうです？」",
-          "「最近“社内でよく聞く言葉”ってあります？地味にキーワードで空気変わりますよね」",
-          "「そういえば最近“業界の噂”とか何か耳にされました？結構情報錯綜してて…」",
-          "「最近“あと一歩で決まりそうだった案件”とかありました？その温度感、すごく大事で…」"
-        ];
-
-        const sCell = sheet.getRange(row, 19);
-        const cur = sCell.getValue();
-        const curIdx = phrases.indexOf(cur);
-        const nextIndex = (curIdx < 0 ? 0 : (curIdx + 1) % phrases.length);
-        sCell.setValue(phrases[nextIndex]);
         return;
       }
 
-      // H列：架電カウント（D=4）→ クリア ＋ アポイントカウント（N=14）+1
-      if (col === 8 && !isEmpty(value)) {
-        if (callLogSheet) updateCallLog(callLogSheet, ymd, 4, tz);
-
-        const statusCell = sheet.getRange(row, 14);
-        const status0 = getOrInitStatus_(statusCell.getValue());
-        const updated = bumpCounterText_(status0, "アポイント");
-        statusCell.setValue(updated);
-
-        sheet.getRange(row, 8).clearContent();
+      case "会話履歴/新規":
+      case "会話履歴/現S": {
+        //=== B空なら黄、入力でクリア
+        if (col === 2) e.range.setBackground(value !== "" ? null : "#FFFF00");
         return;
       }
-
-      // M列：今Qヨミへコピー＆最新会話をEへ
-      if (col === 13 && !isEmpty(value)) {
-        const yomiSheet = ss.getSheetByName("今Qヨミ");
-        if (yomiSheet) {
-          const srcRange = sheet.getRange(row, 1, 1, lastCol);
-          const targetRow = yomiSheet.getLastRow() + 1;
-          srcRange.copyTo(yomiSheet.getRange(targetRow, 1), { contentsOnly: false });
-
-          const conv = getLatestConversation(ss.getSheetByName(historyName), companyName);
-          yomiSheet.getRange(targetRow, 5).setValue(conv);
-        }
-        sheet.getRange(row, 13).clearContent();
-        return;
-      }
-
-      return;
     }
-
-    //=== 会話履歴：B空なら黄、入力でクリア
-    if (sheetName === "会話履歴/新規" || sheetName === "会話履歴/現S") {
-      if (col === 2) e.range.setBackground(e.range.getValue() !== "" ? null : "#FFFF00");
-      return;
-    }
-
-    //=== 新規ホット：G(7)チェック → TRUE:緑 / FALSE:薄紫
-    if (sheetName === "新規ホット" && col === 7 && row > 1) {
-      const checked = (e.range.getValue() === true || e.value === "TRUE" || e.value === 1);
-      setRowColorByFlag_(sheet, row, lastCol, checked);
-      return;
-    }
-
-    //=== 掲載開始顧客：I(9)入力 → 新規へ転記＋履歴へ追記＋相互リンク＋行グレー化
-    if (sheetName === "掲載開始顧客" && col === 9 && row > 1 && value !== "") {
-      upsertShinkiAndHistoryFromKeisai_(ss, sheet, row, ymd, tz);
-      return;
-    }
-
-    //=== 新規ホット：J(10)入力 → 会話履歴/新規へ追記（B固定なし）＋ 架電記録/新規 B列+1 ＋ 営業先リスト/新規I更新 ＋ セルクリア
-    if (sheetName === "新規ホット" && col === 10 && !isEmpty(value)) {
-      const companyName = String(sheet.getRange(row, 1).getDisplayValue() || "").trim();
-      if (!companyName) return;
-
-      const text = `${ymd} ${hh} - ${value}`;
-
-      const hist = ss.getSheetByName("会話履歴/新規");
-      if (hist) {
-        const hit = hist
-          .getRange("A:A")
-          .createTextFinder(companyName)
-          .matchCase(true)
-          .matchEntireCell(true)
-          .findNext();
-
-        if (hit) {
-          const r = hit.getRow();
-          const c = hist.getRange(r, 3);
-          c.setValue((c.getValue() ? c.getValue() + "\n" : "") + text);
-        } else {
-          hist.appendRow([companyName, "", text]);
-        }
-      }
-
-      const clog = ss.getSheetByName("架電記録/新規");
-      if (clog) {
-        const found = clog
-          .getRange("A:A")
-          .createTextFinder(ymd)
-          .matchCase(true)
-          .matchEntireCell(true)
-          .findNext();
-
-        if (found) {
-          const r = found.getRow();
-          const cell = clog.getRange(r, 2); // B列
-          const n = Number(cell.getValue() || 0);
-          cell.setValue(n + 1);
-        } else {
-          const r = clog.getLastRow() + 1;
-          clog.getRange(r, 1).setValue(ymd);
-          clog.getRange(r, 2).setValue(1);
-        }
-      }
-
-      const salesNew = ss.getSheetByName("営業先リスト/新規");
-      if (salesNew && companyName) {
-        const hitSales = salesNew
-          .getRange("A:A")
-          .createTextFinder(companyName)
-          .matchCase(true)
-          .matchEntireCell(true)
-          .findNext();
-
-        if (hitSales) {
-          salesNew.getRange(hitSales.getRow(), 9).setValue(ymd); // I列
-        }
-      }
-
-      sheet.getRange(row, col).clearContent();
-      sheet.getRange(row, 1, 1, lastCol).setBackground("#E6E6FA");
-      return;
-    }
-
   } catch (error) {
     console.error("onEdit エラー:", error);
   }
 }
 
-
-//================ 共通関数 ================
-function setDateOnSalesByName_(ss, name, ymd) {
-  const n = String(name || "").trim();
-  if (!n) return false;
-
-  const sh = ss.getSheetByName("営業先リスト/現S");
-  if (!sh) return false;
-
-  const idx = buildNameIndex_(sh, 1);
-  const hitRow = idx[String(n).trim().toLowerCase()];
-  if (hitRow > 0) {
-    sh.getRange(hitRow, 10).setValue(ymd);
-    return true;
-  }
-  return false;
+// A列で社名が完全一致する最初の行番号（なければ0）
+function findRowInColA_(sheet, text) {
+  const hit = sheet.getRange("A:A").createTextFinder(String(text))
+    .matchCase(true).matchEntireCell(true).findNext();
+  return hit ? hit.getRow() : 0;
 }
 
-function buildNameIndex_(sheet, startRow) {
-  const sr = startRow || 1;
-  const last = sheet.getLastRow();
-  if (last < sr) return {};
-
-  const vals = sheet.getRange(sr, 1, last - sr + 1, 1).getDisplayValues();
-  const norm = s => String(s || "").trim().toLowerCase();
-  const map = {};
-
-  for (let i = 0; i < vals.length; i++) {
-    const key = norm(vals[i][0]);
-    if (key && map[key] == null) map[key] = sr + i;
+// 会話履歴のC列へ1行追記。label があればB列にも書く。新しい行を作ったときだけその行番号を返す
+function appendHistory_(hist, company, text, label) {
+  const r = findRowInColA_(hist, company);
+  if (r) {
+    const c = hist.getRange(r, 3);
+    const cur = c.getValue();
+    c.setValue((cur ? cur + "\n" : "") + text);
+    if (label) hist.getRange(r, 2).setValue(label);
+    return 0;
   }
-  return map;
+  hist.appendRow([company, label || "", text]);
+  return hist.getLastRow();
+}
+
+// 行全体（最終列まで）の背景色を変える
+function paintRow_(sheet, row, color) {
+  sheet.getRange(row, 1, 1, sheet.getLastColumn()).setBackground(color);
+}
+
+
+//================ 共通関数 ================
+// 営業先リスト/現S のA列（大文字小文字・前後空白は無視）で名前を順に探し、最初に見つかった行のJ列へ日付
+function setGenSLastValidDate_(ss, names, ymd) {
+  const sh = ss.getSheetByName("営業先リスト/現S");
+  if (!sh || sh.getLastRow() < 1) return;
+  const norm = s => String(s || "").trim().toLowerCase();
+  const colA = sh.getRange(1, 1, sh.getLastRow(), 1).getDisplayValues().map(r => norm(r[0]));
+  for (const name of names) {
+    const key = norm(name);
+    const i = key ? colA.indexOf(key) : -1;
+    if (i >= 0) {
+      sh.getRange(i + 1, 10).setValue(ymd);
+      return;
+    }
+  }
 }
 
 function updateRowColor(sheet, row, lastCol) {
@@ -583,12 +377,6 @@ function setRowColorByFlag_(sheet, row, lastCol, flag) {
   const cur = (rng.getBackground() || "").toUpperCase();
   const tgt = color.toUpperCase();
   if (cur !== tgt) rng.setBackground(color);
-}
-
-function paintRows_(sheet, rowNumbers, lastCol, colorHex) {
-  if (!rowNumbers || rowNumbers.length === 0) return;
-  const ranges = rowNumbers.map(r => sheet.getRange(r, 1, 1, lastCol));
-  sheet.getRangeList(ranges).setBackground(colorHex);
 }
 
 //================ ステータス（N列）管理：初期化 & インクリメント =================
@@ -642,32 +430,18 @@ function upsertShinkiAndHistoryFromKeisai_(ss, keisaiSheet, row, ymd, tz) {
     .filter(Boolean)
     .join("\n");
 
-  const note = keyman;
   const newList = ss.getSheetByName("営業先リスト/新規");
   const hist = ss.getSheetByName("会話履歴/新規");
   if (!newList || !hist) return;
 
-  const hit = newList
-    .getRange("A:A")
-    .createTextFinder(company)
-    .matchCase(true)
-    .matchEntireCell(true)
-    .findNext();
-
-  const targetRow = hit ? hit.getRow() : newList.getLastRow() + 1;
+  const targetRow = findRowInColA_(newList, company) || newList.getLastRow() + 1;
 
   // 掲載開始顧客 A/B/C/I → 営業先リスト/新規 A/B/C/D
-  newList.getRange(targetRow, 1, 1, 4).setValues([[
-    company,
-    phone,
-    address,
-    keyman
-  ]]);
+  newList.getRange(targetRow, 1, 1, 4).setValues([[company, phone, address, keyman]]);
 
   // 転記実行日を I（最終TEL）・J（最終有効）へ日付型で記録
   const transferTz = ss.getSpreadsheetTimeZone();
-  const transferYmd = Utilities.formatDate(new Date(), transferTz, "yyyy/MM/dd");
-  const transferDate = Utilities.parseDate(transferYmd, transferTz, "yyyy/MM/dd");
+  const transferDate = Utilities.parseDate(Utilities.formatDate(new Date(), transferTz, "yyyy/MM/dd"), transferTz, "yyyy/MM/dd");
   newList.getRange(targetRow, 9, 1, 2)
     .setValues([[transferDate, transferDate]])
     .setNumberFormat("MM/dd");
@@ -679,96 +453,21 @@ function upsertShinkiAndHistoryFromKeisai_(ss, keisaiSheet, row, ymd, tz) {
   nCell.setValue(getOrInitStatus_(nCell.getValue()));
   newList.getRange(targetRow, 22).setValue(ymd);
 
-  const text = `${ymd} ${Utilities.formatDate(new Date(), tz, "HH時")} - ${note || "掲載開始顧客から転記"}`;
-  const hHit = hist
-    .getRange("A:A")
-    .createTextFinder(company)
-    .matchCase(true)
-    .matchEntireCell(true)
-    .findNext();
+  const text = `${ymd} ${Utilities.formatDate(new Date(), tz, "HH時")} - ${keyman || "掲載開始顧客から転記"}`;
+  appendHistory_(hist, company, text, FIXED_HISTORY_LABEL);
 
-  if (hHit) {
-    const r = hHit.getRow();
-    const c = hist.getRange(r, 3);
-    c.setValue((c.getValue() ? c.getValue() + "\n" : "") + text);
-    hist.getRange(r, 2).setValue(FIXED_HISTORY_LABEL);
-  } else {
-    hist.appendRow([company, FIXED_HISTORY_LABEL, text]);
-  }
-
-  const hits = hist
-    .getRange("A:A")
-    .createTextFinder(company)
-    .matchCase(true)
-    .matchEntireCell(true)
-    .findAll();
-
+  // 同名が複数あるときは一番下の行とリンクする
+  const hits = hist.getRange("A:A").createTextFinder(company).matchCase(true).matchEntireCell(true).findAll();
   if (hits && hits.length > 0) {
     const newHistRow = Math.max.apply(null, hits.map(r => r.getRow()));
     createHyperlinks(newList, hist, targetRow, newHistRow, company);
   }
 
-  keisaiSheet.getRange(row, 1, 1, keisaiSheet.getLastColumn()).setBackground("#D3D3D3");
+  paintRow_(keisaiSheet, row, "#D3D3D3");
 }
 
-
-//================ 祝日判定など → 色付け撤去に伴い不要コメントのみ =================
-function parseYmd_(ymd) {
-  const [y, m, d] = ymd.split("/").map(Number);
-  return new Date(y, m - 1, d);
-}
 
 //================ 初期化/ユーティリティ ================
-function initSalesSheetFormats_() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName("営業先リスト/新規");
-  if (!sh) return;
-
-  const last = sh.getLastRow();
-  if (last >= 2) sh.getRange(2, 2, last - 1, 1).setNumberFormat("@");
-}
-
-function sortSheetByColor(sheetName) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(sheetName);
-  if (!sheet) return;
-
-  var lastRow = sheet.getLastRow();
-  var lastCol = sheet.getLastColumn();
-  if (lastRow < 2) return;
-
-  var dataRange = sheet.getRange(2, 1, lastRow - 1, lastCol);
-  var values = dataRange.getValues();
-  var bgs = dataRange.getBackgrounds();
-
-  var colorOrder = {
-    "#ff0000": 1,
-    "#ffc0cb": 2,
-    "#e6e6fa": 3
-  };
-
-  var rows = values.map(function (row, i) {
-    var bg = String(bgs[i][0] || "").toLowerCase();
-    var order = colorOrder[bg] || 4;
-    return { order: order, index: i, row: row, bg: bgs[i] };
-  });
-
-  rows.sort(function (a, b) {
-    if (a.order === b.order) return a.index - b.index;
-    return a.order - b.order;
-  });
-
-  var sortedValues = rows.map(function (r) { return r.row; });
-  var sortedBgs = rows.map(function (r) { return r.bg; });
-
-  dataRange.setValues(sortedValues);
-  dataRange.setBackgrounds(sortedBgs);
-}
-
-function safeRestoreSheetBackup_() {
-  // 仮のダミー関数（何もしない）
-}
-
 // ============================
 // ナビゲーション用関数
 // ============================
@@ -942,17 +641,11 @@ function getLatestConversation(convSheet, companyName) {
 // 相互リンク：営業先と他シートの間でリンク作成
 // ============================
 function createHyperlinks(sourceSheet, targetSheet, sourceRow, targetRow, companyName) {
-  var sourceSheetId = sourceSheet.getSheetId();
-  var targetSheetId = targetSheet.getSheetId();
-
-  var sourceLink = '=IFERROR(HYPERLINK("#gid=' + targetSheetId + '&range=A' + targetRow + '", "' + companyName + '"), "' + companyName + '")';
-  var targetLink = '=IFERROR(HYPERリンク("#gid=' + sourceSheetId + '&range=A' + sourceRow + '", "' + companyName + '"), "' + companyName + '")';
-
-  sourceLink = sourceLink.replace("HYPERリンク", "HYPERLINK");
-  targetLink = targetLink.replace("HYPERリンク", "HYPERLINK");
-
-  sourceSheet.getRange(sourceRow, 1).setFormula(sourceLink);
-  targetSheet.getRange(targetRow, 1).setFormula(targetLink);
+  const name = escapeForFormula_(companyName);
+  const link = (toSheet, toRow) =>
+    `=IFERROR(HYPERLINK("#gid=${toSheet.getSheetId()}&range=A${toRow}", "${name}"), "${name}")`;
+  sourceSheet.getRange(sourceRow, 1).setFormula(link(targetSheet, targetRow));
+  targetSheet.getRange(targetRow, 1).setFormula(link(sourceSheet, sourceRow));
 }
 
 function deleteABCD_andLeftShift() {
@@ -1102,37 +795,17 @@ function processPhoneNumbers() {
 
 function normalizeAddress_inNewProspectSheet() {
   const SHEET_NAME = '営業先リスト/新規';
-  const COLUMN     = 3;    // C列
-  const HEADER_ROW = 1;    // 見出し行
-
-  const ss    = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEET_NAME);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
   if (!sheet) {
     SpreadsheetApp.getUi().alert(`シート「${SHEET_NAME}」が見つかりません。`);
     return;
   }
-
-  const lastRow = sheet.getLastRow();
-  const numRows = lastRow - HEADER_ROW;
+  const numRows = sheet.getLastRow() - 1; // 1行目は見出し
   if (numRows <= 0) return;
 
-  const range  = sheet.getRange(HEADER_ROW + 1, COLUMN, numRows, 1);
-  const values = range.getValues();
-
-  Logger.log('取得した住所データ行数: ' + values.length);
-  values.forEach((row, idx) => {
-    Logger.log(`[${idx}] raw: ` + JSON.stringify(row));
-  });
-
-  const cleaned = values.map((r, i) => {
-    const raw = r[0];
-    Logger.log(`[${i}] 処理前: ${raw}`);
-    const cleanedVal = cleanAddress(String(raw));
-    Logger.log(`[${i}] 処理後: ${cleanedVal}`);
-    return [cleanedVal];
-  });
-
-  range.setValues(cleaned);
+  const range = sheet.getRange(2, 3, numRows, 1); // C列
+  range.setValues(range.getValues().map(r => [cleanAddress(String(r[0]))]));
+  Logger.log('住所を整形した行数: ' + numRows);
 }
 
 /***************
@@ -1166,10 +839,6 @@ function setFormulasIfChanged_(range, newFormulas) {
   const old = range.getFormulas();
   if (!arraysEqual2D_(old, newFormulas)) range.setFormulas(newFormulas);
 }
-function setValuesIfChanged_(range, newValues) {
-  const old = range.getValues();
-  if (!arraysEqual2D_(old, newValues)) range.setValues(newValues);
-}
 function arraysEqual2D_(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -1188,136 +857,15 @@ function runAllProcesses_Phase2() {
     Logger.log("⏭️ Phase2: ロック取得失敗のためスキップ");
     return;
   }
-
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const SOURCE_SHEET = '営業先リスト/新規';
-  const BACKUP_SHEET = '営業先リスト_復元用';
-  const START_ROW = 2;
-
-  let runningMarked = false;
-
   try {
     const start = new Date();
     logTime('Phase2 開始', start);
-
-    const recovered = recoverIfPreviousRunCrashed_Safe_(ss, SOURCE_SHEET, BACKUP_SHEET, START_ROW);
-    if (recovered) {
-      throw new Error('前回の異常終了を検知したため、バックアップから復旧しました。再実行してください。');
-    }
-
-    markProcessRunning_();
-    runningMarked = true;
-
-    ensureBackupSourceHasData_(ss, SOURCE_SHEET, START_ROW);
-    saveSheetBackup_(ss, SOURCE_SHEET, BACKUP_SHEET, START_ROW);
-
-    if (typeof 転記実行_更新付き_会話履歴対応_safe === "function") {
-      logProcessTime("転記更新（会話履歴対応）", () => 転記実行_更新付き_会話履歴対応_safe(ss));
-    }
-
-    if (typeof transferToManagedClients === "function") {
-      logProcessTime("管理顧客シートへの転記", () => transferToManagedClients(ss));
-    }
-
-    if (typeof classifyTargets === "function") {
-      logProcessTime("社名分類（新規A→O）", () => classifyTargets());
-    } else {
-      Logger.log("ℹ️ classifyTargets が見つからないためスキップ");
-    }
-
-    const checkResult = verifySheetAgainstBackup_(ss, SOURCE_SHEET, BACKUP_SHEET, START_ROW);
-    if (!checkResult.ok) {
-      safeRestoreSheetBackup_(ss, BACKUP_SHEET, SOURCE_SHEET, START_ROW);
-      throw new Error(
-        SOURCE_SHEET + " で横ずれを検知したため、処理を元に戻しました。\n" +
-        checkResult.messages.slice(0, 20).join("\n")
-      );
-    }
-
-    clearProcessRunning_();
-    runningMarked = false;
-
-    const end = new Date();
-    Logger.log("✅ Phase2 実行時間: " + ((end - start) / 1000) + "秒");
-
-  } catch (e) {
-    Logger.log("❌ Phase2 エラー: " + (e && e.stack ? e.stack : e));
-
-    if (runningMarked) {
-      try {
-        safeRestoreSheetBackup_(ss, BACKUP_SHEET, SOURCE_SHEET, START_ROW);
-      } catch (restoreError) {
-        Logger.log("❌ 復元にも失敗: " + (restoreError && restoreError.stack ? restoreError.stack : restoreError));
-      }
-    }
-
-    clearProcessRunning_();
-    throw e;
-
+    logProcessTime("転記更新（会話履歴対応）", () => 転記実行_更新付き_会話履歴対応_safe());
+    logProcessTime("社名分類（新規A→O）", () => classifyTargets());
+    Logger.log("✅ Phase2 実行時間: " + ((new Date() - start) / 1000) + "秒");
   } finally {
-    try {
-      lock.releaseLock();
-    } catch (_) {}
+    try { lock.releaseLock(); } catch (_) {}
   }
-}
-
-function ensureBackupSourceHasData_(ss, sourceSheetName, startRow) {
-  const sheet = ss.getSheetByName(sourceSheetName);
-  if (!sheet) {
-    throw new Error('元シートがありません: ' + sourceSheetName);
-  }
-
-  const lastRow = sheet.getLastRow();
-  const lastCol = sheet.getLastColumn();
-  const numRows = Math.max(lastRow - startRow + 1, 0);
-
-  if (lastCol <= 0 || numRows <= 0) {
-    throw new Error('バックアップ対象データが0行のため、処理を中止しました: ' + sourceSheetName);
-  }
-
-  const values = sheet.getRange(startRow, 1, numRows, lastCol).getValues();
-  const hasAnyData = values.some(row => row.some(cell => String(cell).trim() !== ""));
-
-  if (!hasAnyData) {
-    throw new Error('バックアップ対象が実質空のため、処理を中止しました: ' + sourceSheetName);
-  }
-}
-
-function recoverIfPreviousRunCrashed_Safe_(ss, targetSheetName, backupSheetName, startRow) {
-  const props = PropertiesService.getScriptProperties();
-  const running = props.getProperty('ROW_INTEGRITY_RUNNING');
-
-  if (running !== '1') return false;
-
-  Logger.log('⚠️ 前回異常終了の可能性あり。復旧確認を開始');
-
-  const backup = ss.getSheetByName(backupSheetName);
-  if (!backup) {
-    clearProcessRunning_();
-    throw new Error('前回異常終了フラグが残っていますが、バックアップシートがありません: ' + backupSheetName);
-  }
-
-  const backupLastRow = backup.getLastRow();
-  const backupLastCol = backup.getLastColumn();
-  const backupNumRows = Math.max(backupLastRow - 1, 0);
-
-  if (backupLastCol <= 0 || backupNumRows <= 0) {
-    clearProcessRunning_();
-    throw new Error('前回異常終了フラグが残っていますが、バックアップが空のため安全に復旧できません。');
-  }
-
-  const result = verifySheetAgainstBackup_(ss, targetSheetName, backupSheetName, startRow);
-
-  if (!result.ok) {
-    safeRestoreSheetBackup_(ss, backupSheetName, targetSheetName, startRow);
-    Logger.log('✅ 前回異常終了後の復旧を実施');
-    clearProcessRunning_();
-    return true;
-  }
-
-  Logger.log('ℹ️ 前回異常終了フラグは残っていたが、整合性は問題なし');
-  clearProcessRunning_();
-  return false;
 }
 
 function runAllProcesses_Phase3() {
@@ -1339,161 +887,6 @@ function runAllProcesses_Phase3() {
   } finally {
     try { lock.releaseLock(); } catch (_) {}
   }
-}
-
-function createRowIntegrityBackup_(ss, sheetName, startRow) {
-  const sheet = ss.getSheetByName(sheetName);
-  if (!sheet) throw new Error("シートが見つかりません: " + sheetName);
-
-  const lastRow = sheet.getLastRow();
-  const lastCol = sheet.getLastColumn();
-  const numRows = Math.max(lastRow - startRow + 1, 0);
-
-  if (numRows === 0) {
-    return {
-      sheetName,
-      startRow,
-      lastCol,
-      numRows: 0,
-      values: [],
-      backgrounds: [],
-      keyToRowMap: {}
-    };
-  }
-
-  const range = sheet.getRange(startRow, 1, numRows, lastCol);
-  const values = range.getValues();
-  const backgrounds = range.getBackgrounds();
-
-  const keyToRowMap = buildRowKeyMap_(values);
-
-  return {
-    sheetName,
-    startRow,
-    lastCol,
-    numRows,
-    values,
-    backgrounds,
-    keyToRowMap
-  };
-}
-
-function verifyRowIntegrity_(ss, backup) {
-  const result = {
-    ok: true,
-    messages: []
-  };
-
-  const sheet = ss.getSheetByName(backup.sheetName);
-  if (!sheet) {
-    result.ok = false;
-    result.messages.push("監視対象シートが消えています");
-    return result;
-  }
-
-  const lastRow = sheet.getLastRow();
-  const lastCol = sheet.getLastColumn();
-  const numRows = Math.max(lastRow - backup.startRow + 1, 0);
-
-  if (numRows !== backup.numRows) {
-    result.ok = false;
-    result.messages.push("行数が変わっています");
-    return result;
-  }
-
-  if (lastCol !== backup.lastCol) {
-    result.ok = false;
-    result.messages.push("列数が変わっています");
-    return result;
-  }
-
-  if (numRows === 0) return result;
-
-  const values = sheet.getRange(backup.startRow, 1, numRows, lastCol).getValues();
-  const currentMap = buildRowKeyMap_(values);
-
-  for (const key in backup.keyToRowMap) {
-    if (!(key in currentMap)) {
-      result.ok = false;
-      result.messages.push("行が消えています: " + key);
-      continue;
-    }
-
-    const before = JSON.stringify(normalizeRowForCompare_(backup.keyToRowMap[key]));
-    const after = JSON.stringify(normalizeRowForCompare_(currentMap[key]));
-
-    if (before !== after) {
-      result.ok = false;
-      result.messages.push("横ずれ検知: " + key);
-    }
-  }
-
-  return result;
-}
-
-function restoreRowIntegrityBackup_(backup) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(backup.sheetName);
-
-  if (!sheet) throw new Error("復元対象シートが見つかりません");
-
-  if (backup.numRows === 0) return;
-
-  const range = sheet.getRange(backup.startRow, 1, backup.numRows, backup.lastCol);
-  range.setValues(backup.values);
-  range.setBackgrounds(backup.backgrounds);
-
-  SpreadsheetApp.flush();
-  Logger.log("復元完了");
-}
-
-function logRowIntegrityError_(ss, result) {
-  const name = "横ずれ検知ログ";
-  let sheet = ss.getSheetByName(name);
-
-  if (!sheet) {
-    sheet = ss.insertSheet(name);
-    sheet.appendRow(["日時", "内容"]);
-  }
-
-  const now = new Date();
-  result.messages.forEach(msg => {
-    sheet.appendRow([now, msg]);
-  });
-}
-
-function buildRowKeyMap_(values) {
-  const map = {};
-
-  values.forEach(row => {
-    const key = buildRowKey_(row);
-    if (!key) return;
-    map[key] = row;
-  });
-
-  return map;
-}
-
-function buildRowKey_(row) {
-  const a = normalizeCell_(row[0]);
-  const b = normalizeCell_(row[1]);
-  const c = normalizeCell_(row[2]);
-  const d = normalizeCell_(row[3]);
-
-  if (!a && !b && !c && !d) return "";
-  return [a, b, c, d].join("||");
-}
-
-function normalizeRowForCompare_(row) {
-  return row.map(normalizeCell_);
-}
-
-function normalizeCell_(value) {
-  if (value === null || value === undefined) return "";
-  if (value instanceof Date) {
-    return Utilities.formatDate(value, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
-  }
-  return String(value).trim();
 }
 
 /***************
@@ -1876,17 +1269,6 @@ function getFirstBusinessDayOfMonth_(date) {
 }
 
 // 背景は触らず「文字装飾だけ」リセット（ラベンダー保護のため）
-function resetDataRowTextStyleOnly_(sheet, headerRows){
-  const lastRow = sheet.getLastRow(), lastCol = sheet.getLastColumn();
-  if(lastRow <= headerRows || lastCol < 1) return;
-  const range = sheet.getRange(headerRows+1, 1, lastRow-headerRows, lastCol);
-  try{ range.setFontLine('none'); }catch(e){}
-  try{
-    const noUnderline = SpreadsheetApp.newTextStyle().setUnderline(false).build();
-    range.setTextStyle(noUnderline);
-  }catch(e){}
-}
-
 // 掲載開始顧客：優先度＝灰(L有) → ADE判定 → 薄緑(A有)
 // ポイント：最初に薄緑で全Aあり行を塗り、ADEと灰で上書きする
 function colorKeisaiRowsUnified_(opt){
@@ -1895,8 +1277,8 @@ function colorKeisaiRowsUnified_(opt){
     headerRows = 1,
     // ADEの色
     blueExistingColor = '#d6eaff',          // 既存S（営業先/現Sに存在）
-    yellowStoreColor  = (typeof YELLOW_STORE_COLOR !== 'undefined' ? YELLOW_STORE_COLOR : '#fff9c4'), // 「店」を含む
-    pinkBaitoruOnly   = (typeof PINK_BAITORU_ONLY  !== 'undefined' ? PINK_BAITORU_ONLY  : '#ffd1e6'), // D空白 & E=バイトルのみ & 会社記号なし
+    yellowStoreColor  = YELLOW_STORE_COLOR, // 「店」を含む
+    pinkBaitoruOnly   = PINK_BAITORU_ONLY , // D空白 & E=バイトルのみ & 会社記号なし
     // 新要件の色
     grayIfLHasValue   = '#dddddd',          // L列に値があれば灰（最優先）
     lightGreenIfAHas  = '#ccffcc',          // A列に値があれば薄緑（最下位）
@@ -1982,8 +1364,8 @@ function colorKeisaiRowsUnified_(opt){
   if(grayList.length) sh.getRangeList(grayList).setBackground(grayIfLHasValue);
 
   // 並べ替え（上詰め）：灰 → ADE（青→黄→ピンク） → 薄緑
-  if(applySort && typeof sortColoredRowsToTop_ === 'function'){
-    sortColoredRowsToTop_(sh, headerRows, {
+  if(applySort){
+    sortColoredRowsToTop_Light_(sh, headerRows, {
       priorityColors: [
         grayIfLHasValue,
         blueExistingColor, yellowStoreColor, pinkBaitoruOnly,
@@ -2036,19 +1418,13 @@ function updateAllSheetsAndResetColors_Safe() {
     // applySort: true
   });
 
-  // 7) ★NEW：営業日補完ロジックの実行（fillBusinessDays）
-  //    ・既存の fillBusinessDays() があれば安全に実行
-  //    ・未定義なら Toast で通知しスキップ
+  // 7) 営業日補完（fillBusinessDays）。失敗しても Toast で知らせて続行
   runFillBusinessDaysSafely_();
 }
 
 function runFillBusinessDaysSafely_() {
   try {
-    if (typeof fillBusinessDays === 'function') {
-      fillBusinessDays();
-    } else {
-      Logger.log('fillBusinessDays is not defined. Skipped.');
-    }
+    fillBusinessDays();
   } catch (err) {
     Logger.log('fillBusinessDays 実行中に例外: ' + err);
     try {
@@ -2312,21 +1688,28 @@ function transfer営業先リスト完全版() {
     if (k) tgtKeys.add(k);
   }
 
-  // --- まず更新：正規化キー一致行に対して上書き（A列は触らない）
-  for (let i = 1; i < tgt.length; i++) {
-    const aKey = normalize(tgt[i][0]);
-    if (!aKey) continue;
-
-    const e = srcMap[aKey];
-    if (!e) continue;
-
-    const row = i + 1;
-    tgtSh.getRange(row, 3).setValue(e.C);   // C
-    tgtSh.getRange(row, 4).setValue(e.D);   // D
-    tgtSh.getRange(row, 15).setValue(e.O);  // O
-    tgtSh.getRange(row, 16).setValue(e.P);  // P
-    tgtSh.getRange(row, 17).setValue(e.Q);  // Q
-    tgtSh.getRange(row, 18).setValue(e.R);  // R
+  // --- まず更新：正規化キー一致行の C,D,O,P,Q,R を上書き（A列は触らない）
+  //     まとめて書くため、一致しない行は今の中身（数式なら数式）をそのまま書き戻す
+  if (tgt.length > 1) {
+    const n = tgt.length - 1;
+    const cd = tgtSh.getRange(2, 3, n, 2), or = tgtSh.getRange(2, 15, n, 4);
+    const keep = rng => {
+      const v = rng.getValues(), f = rng.getFormulas();
+      return v.map((r, i) => r.map((x, j) => f[i][j] || x));
+    };
+    const cdVals = keep(cd), orVals = keep(or);
+    let hit = 0;
+    for (let i = 1; i < tgt.length; i++) {
+      const e = srcMap[normalize(tgt[i][0])];
+      if (!e) continue;
+      cdVals[i - 1] = [e.C, e.D];
+      orVals[i - 1] = [e.O, e.P, e.Q, e.R];
+      hit++;
+    }
+    if (hit) {
+      cd.setValues(cdVals);
+      or.setValues(orVals);
+    }
   }
 
   // --- 新規追加：既存セットにない正規化キーのみ
@@ -2378,49 +1761,31 @@ function transfer営業先リスト完全版() {
 }
 
 function updateCallLog(sheet, dateString, columnIndex) {
-  // A列のみ取得して、各行の値を確認する
-  var dateValues = sheet.getRange("A:A").getValues();
-  var logRowIndex = -1;
-  var lastDateRow = 0; // A列に日付がある最後の行番号
+  // A列（2行目以降・最終行まで）で今日の日付の行を探す
+  const tz = Session.getScriptTimeZone();
+  const lastRow = sheet.getLastRow();
+  const dates = lastRow >= 2 ? sheet.getRange(2, 1, lastRow - 1, 1).getValues() : [];
+  let lastDateRow = 0; // A列に日付がある最後の行番号
 
-  // ヘッダーは1行目と仮定し、2行目以降をチェック
-  for (var i = 1; i < dateValues.length; i++) {
-    var cellValue = dateValues[i][0];
-    // A列が空の場合はスキップ
-    if (cellValue === null || cellValue.toString().trim() === "") {
-      continue;
-    }
-    var cellDateString = "";
-    if (cellValue instanceof Date) {
-      cellDateString = Utilities.formatDate(cellValue, Session.getScriptTimeZone(), "yyyy/MM/dd");
-    } else {
-      // 文字列の場合、先頭10文字を抽出して比較（例："2025/02/26..." → "2025/02/26"）
-      cellDateString = cellValue.toString().trim().substring(0, 10);
-    }
-
-    // 該当セルがある場合は、その行を記録
-    lastDateRow = i + 1;
-    if (cellDateString === dateString) {
-      logRowIndex = i + 1;  // 行番号に変換
-      break;
+  for (let i = 0; i < dates.length; i++) {
+    const v = dates[i][0];
+    if (v === null || String(v).trim() === "") continue;
+    // 日付型はフォーマット、文字列は先頭10文字（例："2025/02/26..."）で比較
+    const s = v instanceof Date ? Utilities.formatDate(v, tz, "yyyy/MM/dd") : String(v).trim().substring(0, 10);
+    lastDateRow = i + 2;
+    if (s === dateString) {
+      const cell = sheet.getRange(i + 2, columnIndex);
+      cell.setValue((cell.getValue() || 0) + 1);
+      return;
     }
   }
 
-  if (logRowIndex !== -1) {
-    // 既存の行が見つかった場合、該当列の値をカウントアップ
-    var callCountCell = sheet.getRange(logRowIndex, columnIndex);
-    var currentCount = callCountCell.getValue() || 0;
-    callCountCell.setValue(currentCount + 1);
-  } else {
-    // 該当日付がなければ、新規行を追加
-    // 新規行は、A列が初めて空になっている（もしくは最終日付の下）行に挿入する
-    var newRow = [dateString, 0, 0];
-    newRow[columnIndex - 1] = 1; // 対象のカウント列に1を設定
-    // lastDateRow が 0 の場合は、ヘッダーの直下に挿入
-    var insertRow = (lastDateRow === 0) ? 1 : lastDateRow;
-    sheet.insertRowAfter(insertRow);
-    sheet.getRange(insertRow + 1, 1, 1, newRow.length).setValues([newRow]);
-  }
+  // 該当日付がなければ、最後の日付行の下（なければヘッダー直下）に新規行を挿入
+  const newRow = [dateString, 0, 0];
+  newRow[columnIndex - 1] = 1;
+  const insertRow = lastDateRow || 1;
+  sheet.insertRowAfter(insertRow);
+  sheet.getRange(insertRow + 1, 1, 1, newRow.length).setValues([newRow]);
 }
 
 function copyValuesToNextRows() {
@@ -2445,27 +1810,16 @@ function copyValuesToNextRows() {
 
 
 function countStatusSummary() {
-  const sheetName = '営業先リスト/新規'; // 対象シート名
-  const targetColumn = 12; // L列
-  const summaryCell = 'A1';
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('営業先リスト/新規');
+  if (!sheet || sheet.getLastRow() < 2) return;
+  const values = sheet.getRange(2, 12, sheet.getLastRow() - 1).getValues().flat(); // L列
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(sheetName);
-  const values = sheet.getRange(2, targetColumn, sheet.getLastRow() - 1).getValues().flat();
-
-  const counts = {
-    'Ⓐ': 0,
-    'Ⓑ': 0,
-    'Ⓒ': 0,
-    'Ⓓ': 0,
-    '判断がつかない': 0,
-    '繋がってない': 0
-  };
-
+  const counts = { 'Ⓐ': 0, 'Ⓑ': 0, 'Ⓒ': 0, 'Ⓓ': 0, '判断がつかない': 0, '繋がってない': 0 };
   let followCount = 0;
 
-  values.forEach(value => {
-    if (!value) return;
+  values.forEach(v => {
+    if (!v) return;
+    const value = String(v);
     if (value.includes('Ⓐ')) counts['Ⓐ']++;
     else if (value.includes('Ⓑ')) counts['Ⓑ']++;
     else if (value.includes('Ⓒ')) counts['Ⓒ']++;
@@ -2483,9 +1837,7 @@ function countStatusSummary() {
     `判断がつかない ${counts['判断がつかない']}社　繋がってない ${counts['繋がってない']}社\n` +
     `合計 ${total}社　追いS数 ${followCount}社`;
 
-  const cell = sheet.getRange(summaryCell);
-  cell.setValue(summary);
-  cell.setWrap(true);
+  sheet.getRange('A1').setValue(summary).setWrap(true);
 }
 
 
@@ -2528,7 +1880,6 @@ function calcSalesPriorityScore() {
       updateLinkFormulas(['会話履歴/新規'], getCompanyData('営業先リスト/新規', ss), ss);
     }
     SpreadsheetApp.flush();
-    PropertiesService.getDocumentProperties().deleteProperty('calcSalesPriorityScore_running');
     console.log('優先順位更新完了: ' + results.length + '行。Q列メモに理由を記録。');
   } finally {
     lock.releaseLock();
@@ -2544,14 +1895,6 @@ function backupSheet_(ss, sourceSheet, backupSheetName) {
   backup.clear();
   range.copyTo(backup.getRange(1, 1));
   if (!backup.isSheetHidden()) backup.hideSheet();
-}
-
-// 手動復元用。古いバックアップによる自動上書きは行わない。
-function restoreFromBackup_(ss, targetSheetName, backupSheetName) {
-  const target = ss.getSheetByName(targetSheetName);
-  const backup = ss.getSheetByName(backupSheetName);
-  if (!target || !backup || backup.getLastRow() < 2) throw new Error('有効なバックアップがありません');
-  backup.getDataRange().copyTo(target.getRange(1, 1));
 }
 
 // 営業方針の初期値。成約率を学習した予測値ではなく、再連絡の目安。
@@ -2687,20 +2030,6 @@ function salesPriorityCallback_(record, ctx) {
   if (/または|もしくは|か\d|時[～〜~–-]|日[～〜~–-]/.test(s)) return null;
   return { day: day, hour: hour, text: record.text };
 }
-function normalizeBlank_(v) {
-  if (v === null || v === undefined) return '';
-  return String(v).replace(/ |　|​/g, '').trim();
-}
-
-function tryParseDate_(v) {
-  if (typeof v !== 'string') return null;
-  const m = v.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
-  if (!m) return null;
-  const y = +m[1], mo = +m[2], d = +m[3];
-  const dt = new Date(y, mo - 1, d);
-  return isNaN(dt.valueOf()) ? null : dt;
-}
-
 function testSalesPriorityRules() {
   const ctx = { today: salesPriorityDay_('2026/09/14', 'Asia/Tokyo'), hour: 15, tz: 'Asia/Tokyo' };
   const row = (status, day) => { const r = Array(23).fill(''); r[0] = 'テスト'; r[1] = '000-0000-0000'; r[11] = status; r[8] = day || ''; r[9] = day || ''; return r; };
@@ -2751,163 +2080,103 @@ function salesPriorityBudget_(v) {
 function 転記実行_更新付き_会話履歴対応_safe() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const configs = [
-  {
-    src: "営業先リスト/新規",
-    conv: "会話履歴/新規",
-    addrCol: 17,
-    color: "#FFC0CB",        // 薄ピンク
-    darkColor: "#FF8A9A"     // 💡やさしめ濃ピンク
-  },
-  {
-    src: "営業先リスト/現S",
-    conv: "会話履歴/現S",
-    addrCol: 14,
-    color: "#ADD8E6",        // 水色
-    darkColor: "#5B9BD5"     // 💡やさしめ濃ブルー
-  }
-];
+    { src: "営業先リスト/新規", conv: "会話履歴/新規", addrCol: 17, color: "#FFC0CB", darkColor: "#FF8A9A" }, // 薄ピンク / やさしめ濃ピンク
+    { src: "営業先リスト/現S",  conv: "会話履歴/現S",  addrCol: 14, color: "#ADD8E6", darkColor: "#5B9BD5" }  // 水色 / やさしめ濃ブルー
+  ];
   const targetSheet = ss.getSheetByName("メール管理");
   if (!targetSheet) throw new Error("メール管理 シートが見つからぬぞい");
 
   const targetData = targetSheet.getDataRange().getValues();
   const keyMap = {};
-  targetData.forEach((row, i) => {
-    if (row[0]) keyMap[row[0]] = i + 1;
-  });
+  targetData.forEach((row, i) => { if (row[0]) keyMap[row[0]] = i + 1; });
 
+  // 既存行のA〜H（8列）を手元で更新してから1回で書き込む
+  const block = targetData.map(r => { const b = r.slice(0, 8); while (b.length < 8) b.push(""); return b; });
   const toAppend = [];
-  const toUpdate = [];
   const colorLog = [];
   const processedKeys = new Set();
+  let updated = 0;
 
   configs.forEach(cfg => {
     const sheet = ss.getSheetByName(cfg.src);
     if (!sheet) { Logger.log(`⚠️ シートが無い：${cfg.src}`); return; }
     const data = sheet.getDataRange().getValues();
-    Logger.log(`${cfg.src} 行数: ${data.length}`);
 
     const convMap = {};
-    if (cfg.conv) {
-      const cvs = ss.getSheetByName(cfg.conv);
-      if (cvs) {
-        cvs.getDataRange().getValues().forEach((r, i) => {
-          if (i === 0 || !r[0]) return;
-          convMap[r[0]] = r[2];
-        });
-        Logger.log(`${cfg.conv} マップ数: ${Object.keys(convMap).length}`);
-      } else {
-        Logger.log(`⚠️ 会話履歴シートが無い：${cfg.conv}`);
-      }
+    const cvs = ss.getSheetByName(cfg.conv);
+    if (cvs) {
+      cvs.getDataRange().getValues().forEach((r, i) => { if (i > 0 && r[0]) convMap[r[0]] = r[2]; });
+    } else {
+      Logger.log(`⚠️ 会話履歴シートが無い：${cfg.conv}`);
     }
 
     data.forEach((row, i) => {
-      if (i === 0) return;
       const key = row[0];
-      if (!key) return;
-      if (processedKeys.has(key)) {
-        Logger.log(`スキップ: 既に処理済のキー ${key}`);
-        return;
-      }
+      if (i === 0 || !key || processedKeys.has(key)) return;
+      if (row[11] === "一旦追わない") return;
+      if (!row[cfg.addrCol]) return;
 
-      const fVal = row[11];
-      if (fVal === "一旦追わない") {
-        Logger.log(`スキップ: ${key} は一旦追わない`);
-        return;
-      }
-
-      const addr = row[cfg.addrCol];
-      if (!addr) return;
-
-      const dVal = row[3];
-      const lVal = row[11];
-      const jVal = row[9];
-
-      let gVal = row[14];
-      let hVal = row[17];
-      if (cfg.src === "営業先リスト/現S") {
-        gVal = row[18];
-        hVal = row[14];
-      }
-
-      const newRow = [key, dVal, "", jVal, "", lVal, gVal, hVal];
-      if (convMap[key]) newRow[4] = convMap[key];
+      const isGenS = cfg.src === "営業先リスト/現S";
+      const newRow = [key, row[3], "", row[9], convMap[key] || "", row[11], row[isGenS ? 18 : 14], row[isGenS ? 14 : 17]];
 
       if (keyMap[key]) {
         const rowNum = keyMap[key];
-        const exist = targetSheet.getRange(rowNum, 1, 1, newRow.length).getValues()[0];
-        newRow[2] = exist[2];
-        toUpdate.push({ rowNum, values: newRow });
+        newRow[2] = block[rowNum - 1][2]; // C列は既存の値を残す
+        block[rowNum - 1] = newRow;
+        updated++;
         colorLog.push({ rowNum, color: cfg.color, darkColor: cfg.darkColor });
       } else {
         toAppend.push({ values: newRow, color: cfg.color, darkColor: cfg.darkColor });
       }
-
       processedKeys.add(key);
     });
   });
 
-  Logger.log(`更新予定: ${toUpdate.length}件、追加予定: ${toAppend.length}件`);
+  Logger.log(`更新: ${updated}件、追加: ${toAppend.length}件`);
 
-  toUpdate.forEach(o =>
-    targetSheet.getRange(o.rowNum, 1, 1, o.values.length).setValues([o.values])
-  );
-
+  if (updated) targetSheet.getRange(1, 1, block.length, 8).setValues(block);
   if (toAppend.length) {
     const start = targetSheet.getLastRow() + 1;
-    targetSheet
-      .getRange(start, 1, toAppend.length, toAppend[0].values.length)
-      .setValues(toAppend.map(r => r.values));
-    toAppend.forEach((r, i) =>
-      colorLog.push({ rowNum: start + i, color: r.color, darkColor: r.darkColor })
-    );
+    targetSheet.getRange(start, 1, toAppend.length, 8).setValues(toAppend.map(r => r.values));
+    toAppend.forEach((r, i) => colorLog.push({ rowNum: start + i, color: r.color, darkColor: r.darkColor }));
   }
 
   const today = new Date();
   const thresholdDate = new Date(today);
   thresholdDate.setMonth(today.getMonth() - 1);
 
-  const allRange = targetSheet.getDataRange();
-  const allData = allRange.getValues();
+  // 書き込み後のシートを読み直して並べ替え・色付け
+  const allData = targetSheet.getDataRange().getValues();
   const header = allData[0];
-  const dataOnly = allData.slice(1);
 
-  const enhancedRows = dataOnly.map((row, i) => {
-    const key = row[0];
+  // 社名 → 色（同じ社名が複数あれば先に記録されたもの）
+  const logByKey = new Map();
+  colorLog.forEach(l => {
+    const refRow = allData[l.rowNum - 1];
+    if (refRow && !logByKey.has(refRow[0])) logByKey.set(refRow[0], l);
+  });
+
+  const enhancedRows = allData.slice(1).map(row => {
     const dateC = row[2] instanceof Date ? row[2] : null;
     const dateD = row[3] instanceof Date ? row[3] : null;
     const isOld = (dateC && dateC < thresholdDate) || (dateD && dateD < thresholdDate);
-
-    const log = colorLog.find(l => {
-      const refRow = allData[l.rowNum - 1];
-      return refRow && refRow[0] === key;
-    });
-
-    let baseColor = "#FFFFFF";
-    let weight = 0;
-    if (log) {
-      baseColor = isOld ? log.darkColor : log.color;
-      weight = isOld ? 2 : 1;
-    }
-
-    const sortKey = isOld
-      ? Math.min(dateC?.getTime() || Infinity, dateD?.getTime() || Infinity)
-      : today.getTime();
-
+    const log = logByKey.get(row[0]);
     return {
       values: row,
-      color: baseColor,
-      weight: weight,
-      sortKey: sortKey
+      color: log ? (isOld ? log.darkColor : log.color) : "#FFFFFF",
+      weight: log ? (isOld ? 2 : 1) : 0,
+      sortKey: isOld ? Math.min(dateC?.getTime() || Infinity, dateD?.getTime() || Infinity) : today.getTime()
     };
   });
 
   enhancedRows.sort((a, b) => b.weight - a.weight || a.sortKey - b.sortKey);
 
+  const width = header.length;
   const finalData = [header, ...enhancedRows.map(r => r.values)];
-  const finalColors = [Array(finalData[0].length).fill("#FFFFFF"), ...enhancedRows.map(r => Array(finalData[0].length).fill(r.color))];
+  const finalColors = [Array(width).fill("#FFFFFF"), ...enhancedRows.map(r => Array(width).fill(r.color))];
 
-  targetSheet.getRange(1, 1, finalData.length, finalData[0].length).setValues(finalData);
-  targetSheet.getRange(1, 1, finalColors.length, finalData[0].length).setBackgrounds(finalColors);
+  targetSheet.getRange(1, 1, finalData.length, width).setValues(finalData);
+  targetSheet.getRange(1, 1, finalColors.length, width).setBackgrounds(finalColors);
 }
 
 // ===== ログ強化設定（ログシート削除・ドライラン廃止版） =====
@@ -2942,7 +2211,6 @@ const USER_COPY_SHEET_NAME     = 'phase③申込';
 const addDays   = (d,n)=>{const r=new Date(d);r.setDate(r.getDate()+n);r.setHours(0,0,0,0);return r;};
 const addMonths = (d,n)=>{const r=new Date(d);r.setMonth(r.getMonth()+n);r.setHours(0,0,0,0);return r;};
 const addYears  = (d,n)=>{const r=new Date(d);r.setFullYear(r.getFullYear()+n);r.setHours(0,0,0,0);return r;};
-const formatDate=(d,tz)=>Utilities.formatDate(d,tz,'yyyy/MM/dd');
 const hyperlink =(id)=> id ? `=HYPERLINK("https://ats.rct.airwork.net/agency/a/clients/${id}","管理画面")` : '';
 
 // === 営業先マスタ：会社名→管理番号 ===
@@ -3023,7 +2291,6 @@ function buildRowsFromCycles(cycles){
   const place='buildRowsFromCycles';
   LOG.info(place,'入力件数', cycles.length);
 
-  const tz    = Session.getScriptTimeZone();
   const today = new Date(); today.setHours(0,0,0,0);
   const latest={}
   cycles.forEach(c=>{
@@ -3332,31 +2599,6 @@ function 一度だけ_チェックボックス再設定(){
   ensureCheckboxColumns_(dest, 2, 10000);
 }
 
-// ===== ヘルパ =====
-function isEmptyLike_(v){
-  if (v === null || v === undefined) return true;
-  if (v instanceof Date) return false;
-  const s = String(v).replace(/\s|　/g, '');
-  return s.length === 0;
-}
-
-function isRowBlank_(row){
-  for (let i=0;i<row.length;i++){
-    if (!isEmptyLike_(row[i])) return false;
-  }
-  return true;
-}
-
-function isKeyIncomplete_(row, m){
-  const company = row[m.顧客名];
-  const medium  = row[m.媒体中項目];
-  const start   = row[m.掲載開始];
-  if (isEmptyLike_(company)) return true;
-  if (isEmptyLike_(medium))  return true;
-  if (isEmptyLike_(start))   return true;
-  return false;
-}
-
 /* =========================================
    設定
 ========================================= */
@@ -3366,9 +2608,9 @@ const PHASE1_LOG_SHEET = '実行ログ';
 const PHASE1_HEADER_ROWS = 1;
 
 const ENABLE_EXTERNAL_HIGHLIGHT = true;     // 外部照合を使う
-const ENABLE_SORT_COLORED_ROWS = false;     // まずは false 推奨
-const ENABLE_PREFIX_RAW_MATCH = false;      // 誤爆＆爆重回避のため false 推奨
-const PREFIX_MATCH_MIN_LENGTH = 4;          // prefix許可時の最小長
+     // まずは false 推奨
+      // 誤爆＆爆重回避のため false 推奨
+          // prefix許可時の最小長
 
 const EXTERNAL_HIGHLIGHT_MAX_SHEETS = 3;    // 月シート走査数の上限
 const EXTERNAL_HIGHLIGHT_MAX_ROWS_PER_SHEET = 3000; // 1シート最大走査行数
@@ -3376,7 +2618,6 @@ const EXTERNAL_HIGHLIGHT_MAX_ROWS_PER_SHEET = 3000; // 1シート最大走査行
 const HL_SOURCE_SPREADSHEET_ID = '1uFDME4QOUdJifxh80PmUWVapqc9AXu2lauKhgayU0eM';
 const HL_SOURCE_COL_INDEX = 3;
 const HL_COLOR = '#ffcccc';
-const HL_CLEAR_BEFORE = false;
 const HL_SHEET_NAME_REGEX = /^\d{6}月$/;
 
 const YELLOW_STORE_COLOR   = '#fff9c4';
@@ -3385,7 +2626,6 @@ const GREEN_DEFAULT_FILL   = '#e5ffe5';
 const LAVENDER_FIXED_COLOR = '#e6e6fa';
 const DUP_PHONE_COLOR      = '#ffe6cc';
 
-const GAS_SENSEI_HISTORY_LABEL = 'Ⓒ1か月以内ニーズ有 × 選ばなそう';
 const _CORE_NAME_CACHE = new Map();
 
 
@@ -3783,14 +3023,8 @@ withSheetLock_(() => {
     safeHighlightMatchedCustomers_(sh, startMs, limitMs);
   }
 
-  if (ENABLE_SORT_COLORED_ROWS) {
-    safeSortColoredRowsToTop_(sh, HEADER_ROWS, startMs, limitMs);
-  }
-
-  // =========================================
-// 色順に並び替え
-// =========================================
-sortColoredRowsToTop_Light_(sh, HEADER_ROWS);
+  // 色順に並び替え
+  sortColoredRowsToTop_Light_(sh, HEADER_ROWS);
 
   try { sh.getDataRange().setFontWeight('bold'); } catch (e) {}
 }
@@ -3799,10 +3033,6 @@ sortColoredRowsToTop_Light_(sh, HEADER_ROWS);
 /* =========================================
    setJobMediaLinks 改善版
 ========================================= */
-
-function setJobMediaLinks() {
-  setJobMediaLinks_Improved();
-}
 
 function setJobMediaLinks_Improved() {
   const ss = SpreadsheetApp.getActive();
@@ -3894,10 +3124,7 @@ function safeHighlightMatchedCustomers_(targetSheet, startMs, limitMs) {
       sourceSpreadsheetId: HL_SOURCE_SPREADSHEET_ID,
       sourceColIndex: HL_SOURCE_COL_INDEX,
       highlightColor: HL_COLOR,
-      clearBefore: HL_CLEAR_BEFORE,
       sheetNameRegex: HL_SHEET_NAME_REGEX,
-      allowPrefixRawMatch: ENABLE_PREFIX_RAW_MATCH,
-      prefixMatchMinLength: PREFIX_MATCH_MIN_LENGTH,
       maxSheets: EXTERNAL_HIGHLIGHT_MAX_SHEETS,
       maxRowsPerSheet: EXTERNAL_HIGHLIGHT_MAX_ROWS_PER_SHEET,
       startMs: startMs,
@@ -3912,55 +3139,26 @@ function safeHighlightMatchedCustomers_(targetSheet, startMs, limitMs) {
   }
 }
 
-function highlightMatchedCustomers_(targetSheet, opt) {
-  return highlightMatchedCustomers_Improved(targetSheet, opt);
-}
-
 function getExternalHighlightMap_(opt) {
-  const {
-    sourceSpreadsheetId,
-    sourceColIndex,
-    sheetNameRegex,
-    allowPrefixRawMatch,
-    prefixMatchMinLength,
-    maxSheets,
-    maxRowsPerSheet,
-    startMs,
-    limitMs
-  } = opt || {};
+  const { sourceSpreadsheetId, sourceColIndex, sheetNameRegex, maxSheets, maxRowsPerSheet, startMs, limitMs } = opt || {};
 
   const cache = CacheService.getScriptCache();
-  const cacheKey = [
-    'extHL',
-    sourceSpreadsheetId,
-    sourceColIndex,
-    maxSheets,
-    maxRowsPerSheet,
-    allowPrefixRawMatch ? 1 : 0,
-    prefixMatchMinLength
-  ].join(':');
-
+  const cacheKey = ['extHL2', sourceSpreadsheetId, sourceColIndex, maxSheets, maxRowsPerSheet].join(':');
   const cached = cache.get(cacheKey);
-  if (cached) {
-    const parsed = JSON.parse(cached);
-    return {
-      exactMap: parsed.exactMap || {},
-      prefixCandidates: parsed.prefixCandidates || []
-    };
-  }
+  if (cached) return JSON.parse(cached);
 
   if (isTimeLimitReached_(startMs, limitMs)) {
     throw new Error('TIME_GUARD: 外部照合: 辞書生成前 の途中で自主停止');
   }
 
   const src = SpreadsheetApp.openById(sourceSpreadsheetId);
-  let monthSheets = src.getSheets().filter(sh => sheetNameRegex.test(sh.getName()));
-
-  monthSheets.sort((a, b) => a.getName() < b.getName() ? 1 : -1);
-  monthSheets = monthSheets.slice(0, maxSheets);
+  const monthSheets = src.getSheets()
+    .filter(sh => sheetNameRegex.test(sh.getName()))
+    .sort((a, b) => a.getName() < b.getName() ? 1 : -1)
+    .slice(0, maxSheets);
 
   const exactMap = {};
-  const prefixCandidates = [];
+  const colLetter = columnIndexToLetter_(sourceColIndex);
 
   monthSheets.forEach(sh => {
     if (isTimeLimitReached_(startMs, limitMs)) {
@@ -3972,77 +3170,25 @@ function getExternalHighlightMap_(opt) {
     if (rMax < 1) return;
 
     const col = sh.getRange(1, sourceColIndex, rMax, 1).getDisplayValues();
-
     for (let r = 0; r < rMax; r++) {
-      if (r % 500 === 0 && isTimeLimitReached_(startMs, limitMs)) {
-        throw new Error('TIME_GUARD: 外部照合: 候補収集 の途中で自主停止');
-      }
-
       const text = (col[r][0] ?? '').toString().trim();
       if (!text) continue;
-
       const aft = extractAfterFor(text);
-      if (!aft) continue;
-
-      const core = normalizeCompanyCore_(aft);
-      if (!core) continue;
-
-      const a1 = columnIndexToLetter_(sourceColIndex) + (r + 1);
-      const url = `https://docs.google.com/spreadsheets/d/${sourceSpreadsheetId}/edit#gid=${gid}&range=${encodeURIComponent(a1)}`;
-
-      if (!exactMap[core]) {
-        exactMap[core] = { url, raw: String(aft).trim() };
-      }
-
-      if (allowPrefixRawMatch && core.length >= prefixMatchMinLength) {
-        prefixCandidates.push({
-          core: core,
-          raw: String(aft).trim(),
-          url: url
-        });
-      }
+      const core = aft && normalizeCompanyCore_(aft);
+      if (!core || exactMap[core]) continue;
+      const url = `https://docs.google.com/spreadsheets/d/${sourceSpreadsheetId}/edit#gid=${gid}&range=${encodeURIComponent(colLetter + (r + 1))}`;
+      exactMap[core] = { url, raw: String(aft).trim() };
     }
   });
 
-  cache.put(
-    cacheKey,
-    JSON.stringify({ exactMap, prefixCandidates }),
-    60 * 10
-  );
-
-  return { exactMap, prefixCandidates };
+  const result = { exactMap };
+  try { cache.put(cacheKey, JSON.stringify(result), 60 * 10); } catch (e) {} // 100KB超は保存しないだけ
+  return result;
 }
-
-function startsWithRawPlusSpace_(targetRaw, srcRaw) {
-  if (!targetRaw || !srcRaw) return false;
-  const t = String(targetRaw).trim();
-  const s = String(srcRaw).trim();
-  return t.startsWith(s + ' ') || t.startsWith(s + '　');
-}
-
 
 /* =========================================
    色行ソート 軽量版
 ========================================= */
-
-function safeSortColoredRowsToTop_(sheet, headerRows, startMs, limitMs) {
-  checkTimeLimit_(startMs, limitMs, '色行ソート開始前');
-
-  try {
-    const lastRow = sheet.getLastRow();
-    if (lastRow <= 300) {
-      sortColoredRowsToTop_Light_(sheet, headerRows);
-    } else {
-      writeExecLog_('色行ソートをスキップ: 行数が多いため ' + lastRow + '行', 'WARN');
-    }
-  } catch (e) {
-    writeExecLog_('色行ソート失敗: ' + e.message, 'WARN');
-  }
-}
-
-function sortColoredRowsToTop_(sheet, headerRows, opt) {
-  sortColoredRowsToTop_Light_(sheet, headerRows, opt);
-}
 
 function sortColoredRowsToTop_Light_(sheet, headerRows, opt) {
   const lastRow = sheet.getLastRow();
@@ -4430,30 +3576,13 @@ const THRESH = {
   clusterKm: 0.5,        // クラスタ距離（km）
   clusterMinSize: 3,     // クラスタ最小件数
   recentDays: 30,        // 直近予定で黒●外し
-  walkKmPerHour: 4,
   cacheSecs: 21600,      // 6h
   cacheKeyMax: 230
 };
 
 const AUTO_CONF = {
-  timeBudgetMin: 180,        // ★3時間
-  dwellMinPerStop: 0,        // 1件あたり滞在（分）
-  speedKmPerHour: 12,        // 徒歩＋小移動の想定
-  twoOptMillis: 3000,
-  maxStarts: 8,
-  minClusterSize: 3,
-  maxTravelMinPerLeg: 20,      // 起点ナシ時の各レッグ上限（分）
-  maxTravelMinPerLegStart: 20  // 起点アリ時の各レッグ上限（分）
+  speedKmPerHour: 12         // 徒歩＋小移動の想定（移動分数の表示用）
 };
-
-// 戦略重み（今は使わないが残しておく）
-const STRATEGY = {
-  focus: "count_max",
-  weight: { published: 1.0, new: 1.0, current: 0.0 }
-};
-
-// 長距離ジャンプ抑制
-const JUMP_KM = 10;
 
 // === “道路っぽい距離” 近似（APIなし） ======================================
 function haversineKm(lat1,lng1,lat2,lng2){
@@ -4494,12 +3623,6 @@ function roadishKm_(A,B,latRef,detour){
   const blend=0.35*mk + 0.65*hv; // 直線寄りブレンド
   return Math.max(hv,blend)*detour;
 }
-function jumpPenalty_(km){
-  if(km<=10) return 1;
-  if(km>=25) return 0.6;
-  return 1 - (km-10)*(0.4/15);
-}
-
 // ＝＝＝ 小道具 ＝＝＝
 function to2dBlank(n){ return Array.from({length:n}, ()=>[""]); } // N×1空配列
 function normAddr(s){ return String(s||"").replace(/　/g," ").replace(/\s+/g," ").trim(); }
@@ -4674,31 +3797,6 @@ function fillLatLng_(sheetName){
     latlng[i][0]=loc.lat; latlng[i][1]=loc.lng;
   }
   sh.getRange(2,COL.E,lastRow-1,2).setValues(latlng);
-}
-
-// 3) 近接クラスタ（連結成分）
-//   （今は直接は使っていないが、将来拡張用として残す）
-function buildClusters_(pts, km){
-  const n=pts.length;
-  const neigh=Array.from({length:n}, ()=>[]);
-  for(let i=0;i<n;i++){
-    for(let j=i+1;j<n;j++){
-      if(haversineKm(pts[i].lat,pts[i].lng,pts[j].lat,pts[j].lng) <= km){
-        neigh[i].push(j); neigh[j].push(i);
-      }
-    }
-  }
-  const seen=new Array(n).fill(false), clusters=[];
-  for(let s=0;s<n;s++){
-    if(seen[s]) continue;
-    const q=[s], comp=[]; seen[s]=true;
-    while(q.length){
-      const u=q.pop(); comp.push(u);
-      for(const v of neigh[u]) if(!seen[v]){ seen[v]=true; q.push(v); }
-    }
-    clusters.push({nodes:comp, neigh});
-  }
-  return clusters;
 }
 
 // 4) 並べ替え（G昇順）
@@ -5223,16 +4321,7 @@ function appendShinkiHotDaily(){
     }
   }
 
-  if(outVals.length){
-    // ▼修正ポイント：A列の最終データ行の“次の行”に追加する
-    const start = getNextAppendRowByColA_(DST);
-    DST.getRange(start,1,outVals.length,6).setValues(outVals);
-    for(let i=0;i<outVals.length;i++){
-      DST.getRange(start+i,4).setRichTextValue(outRich[i]); // D列にリンク
-      // ★K列(11)に住所を転記
-      DST.getRange(start+i,11).setValue(addrList[i] || '');
-    }
-  }
+  appendHotRows_(DST, outVals, outRich, addrList);
 
   // ★ 元シートのL列一括更新（非連続セルをRangeListでまとめて更新）
   if(undecidedRows.length){
@@ -5292,7 +4381,7 @@ function backfillShinkiHotAllPast(){
     for(const d of OFFSETS){
       const notifyDate = addDays_(base0, d);
       if(notifyDate > today) continue; // 未来は除外
-      const bucket = stageFromOffsetDays_(d);
+      const bucket = stageFromDays_(d);
       const dateStr = Utilities.formatDate(notifyDate, tz, 'yyyy/MM/dd');
       const dedupKey = `${name}|${bucket}|${dateStr}`;
       if(exIdx.has(dedupKey)) continue;
@@ -5311,16 +4400,7 @@ function backfillShinkiHotAllPast(){
     }
   }
 
-  if(outVals.length){
-    // ▼修正ポイント：A列の最終データ行の“次の行”に追加する
-    const start = getNextAppendRowByColA_(DST);
-    DST.getRange(start,1,outVals.length,6).setValues(outVals);
-    for(let i=0;i<outVals.length;i++){
-      DST.getRange(start+i,4).setRichTextValue(outRich[i]); // D列にリンク
-      // ★K列(11)に住所を転記
-      DST.getRange(start+i,11).setValue(addrList[i] || '');
-    }
-  }
+  appendHotRows_(DST, outVals, outRich, addrList);
 
   // ★ 元シートL列を一括で「判断がつかない」に更新
   if(undecidedRows.length){
@@ -5374,6 +4454,16 @@ function linkHotAndHistory(){
 }
 
 
+//=== 新規ホットへ追記：A列の最終データ行の“次の行”から A〜F・D列リンク・K列住所をまとめて書く ====
+function appendHotRows_(dst, outVals, outRich, addrList){
+  if(!outVals.length) return;
+  const start = getNextAppendRowByColA_(dst);
+  const n = outVals.length;
+  dst.getRange(start,1,n,6).setValues(outVals);
+  dst.getRange(start,4,n,1).setRichTextValues(outRich.map(r => [r]));        // D列にリンク
+  dst.getRange(start,11,n,1).setValues(addrList.map(a => [a || '']));        // K列に住所
+}
+
 //=== ステータス判定（Ⓐ/Ⓑ/Ⓒ のみ） ====================================================
 function isHotStatus_(s){
   return /Ⓐ1か月以内ニーズ有 × 選んでくれる|Ⓑ1か月以内ニーズ有 × 選ぶか不明|Ⓒ1か月以内ニーズ有 × 選ばなそう/.test(s||'');
@@ -5390,16 +4480,6 @@ function stageFromDays_(d){
   return null;
 }
 //=== オフセット → 段階名（バックフィル用） =============================================
-function stageFromOffsetDays_(d){
-  if(d===7)  return '1週間';
-  if(d===14) return '2週間';
-  if(d===21) return '3週間';
-  if(d===28) return '4週間';
-  if(d===60) return '2カ月';
-  if(d===90) return '3カ月';
-  return null;
-}
-
 //=== “今日”すでにある (社名|段階) のセット（重複防止：毎日追記用） =====================
 function buildTodayIndex_(dst, todayStr){
   const set = new Set();
@@ -5510,31 +4590,20 @@ function sortHotByDateDesc_(){
 // シート「新規ホット」の色を毎朝リセットし、チェックあり行を灰色にする
 // さらに G列（7列目）を2行目以降でクリア
 function resetAndHighlightRows() {
-  const sheetName = "新規ホット"; // 対象シート名
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("新規ホット");
   if (!sheet) return;
 
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return; // データなしなら終了
 
-  // ★追加：G列をクリア（見出し行は残す）
-  const gRange = sheet.getRange(2, 7, lastRow - 1, 1); // G2:G(last)
-  gRange.clearContent(); // 文字や値のみ消し、書式は残す
+  // G列をクリア（見出し行は残す・書式は残す）
+  sheet.getRange(2, 7, lastRow - 1, 1).clearContent();
 
-  // 背景リセット（null = デフォルト）
-  const range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
-  range.setBackground(null);
-
-  // I列（9列目）のチェックで灰色ハイライト
-  const checkColumn = 9; // I列
-  const checkValues = sheet.getRange(2, checkColumn, lastRow - 1, 1).getValues();
-
-  for (let i = 0; i < checkValues.length; i++) {
-    if (checkValues[i][0] === true) {
-      sheet.getRange(i + 2, 1, 1, sheet.getLastColumn())
-           .setBackground("#d3d3d3"); // チェックあり行を灰色に
-    }
-  }
+  // 背景をリセットし、I列（9列目）にチェックがある行を灰色に
+  const lastCol = sheet.getLastColumn();
+  const range = sheet.getRange(2, 1, lastRow - 1, lastCol);
+  const checks = sheet.getRange(2, 9, lastRow - 1, 1).getValues();
+  range.setBackgrounds(checks.map(c => Array(lastCol).fill(c[0] === true ? "#d3d3d3" : null)));
 }
 
 // 初回に実行してトリガーを設定する関数（毎朝9:30実行）
@@ -5556,180 +4625,10 @@ function createDailyTrigger() {
            .create();
 }
 
-function markProcessRunning_() {
-  const props = PropertiesService.getScriptProperties();
-  props.setProperty('ROW_INTEGRITY_RUNNING', '1');
-  props.setProperty('ROW_INTEGRITY_START', new Date().toISOString());
-}
-
-function clearProcessRunning_() {
-  const props = PropertiesService.getScriptProperties();
-  props.deleteProperty('ROW_INTEGRITY_RUNNING');
-  props.deleteProperty('ROW_INTEGRITY_START');
-}
-
-function saveSheetBackup_(ss, sourceSheetName, backupSheetName, startRow) {
-  const source = ss.getSheetByName(sourceSheetName);
-  if (!source) throw new Error('元シートがありません: ' + sourceSheetName);
-
-  let backup = ss.getSheetByName(backupSheetName);
-  if (!backup) {
-    backup = ss.insertSheet(backupSheetName);
-  }
-
-  backup.clear();
-
-  const lastRow = source.getLastRow();
-  const lastCol = source.getLastColumn();
-  const numRows = Math.max(lastRow - startRow + 1, 0);
-
-  backup.getRange(1, 1).setValue('backup_of');
-  backup.getRange(1, 2).setValue(sourceSheetName);
-  backup.getRange(1, 3).setValue('saved_at');
-  backup.getRange(1, 4).setValue(new Date());
-
-  if (numRows <= 0) return;
-
-  const srcRange = source.getRange(startRow, 1, numRows, lastCol);
-  const values = srcRange.getValues();
-  const backgrounds = srcRange.getBackgrounds();
-
-  const dstRange = backup.getRange(2, 1, numRows, lastCol);
-  dstRange.setValues(values);
-  dstRange.setBackgrounds(backgrounds);
-}
-
-function restoreSheetBackup_(ss, backupSheetName, targetSheetName, startRow) {
-  const backup = ss.getSheetByName(backupSheetName);
-  const target = ss.getSheetByName(targetSheetName);
-
-  if (!backup) throw new Error('バックアップシートがありません: ' + backupSheetName);
-  if (!target) throw new Error('復元先シートがありません: ' + targetSheetName);
-
-  const lastRow = backup.getLastRow();
-  const lastCol = backup.getLastColumn();
-  const numRows = Math.max(lastRow - 1, 0);
-
-  const targetMaxRows = target.getMaxRows();
-  const targetLastCol = target.getLastColumn();
-
-  if (targetMaxRows >= startRow && targetLastCol > 0) {
-    const clearRows = targetMaxRows - startRow + 1;
-    if (clearRows > 0) {
-      target.getRange(startRow, 1, clearRows, targetLastCol).clearContent();
-      target.getRange(startRow, 1, clearRows, targetLastCol).setBackground(null);
-    }
-  }
-
-  if (numRows <= 0) return;
-
-  const srcRange = backup.getRange(2, 1, numRows, lastCol);
-  const values = srcRange.getValues();
-  const backgrounds = srcRange.getBackgrounds();
-
-  const dstRange = target.getRange(startRow, 1, numRows, lastCol);
-  dstRange.setValues(values);
-  dstRange.setBackgrounds(backgrounds);
-}
-
-function verifySheetAgainstBackup_(ss, targetSheetName, backupSheetName, startRow) {
-  const target = ss.getSheetByName(targetSheetName);
-  const backup = ss.getSheetByName(backupSheetName);
-
-  const result = {
-    ok: true,
-    messages: []
-  };
-
-  if (!target) {
-    result.ok = false;
-    result.messages.push('対象シートがありません: ' + targetSheetName);
-    return result;
-  }
-
-  if (!backup) {
-    result.ok = false;
-    result.messages.push('バックアップシートがありません: ' + backupSheetName);
-    return result;
-  }
-
-  const targetLastRow = target.getLastRow();
-  const targetLastCol = target.getLastColumn();
-  const targetNumRows = Math.max(targetLastRow - startRow + 1, 0);
-
-  const backupLastRow = backup.getLastRow();
-  const backupLastCol = backup.getLastColumn();
-  const backupNumRows = Math.max(backupLastRow - 1, 0);
-
-  if (targetNumRows !== backupNumRows) {
-    result.ok = false;
-    result.messages.push(`行数不一致: target=${targetNumRows}, backup=${backupNumRows}`);
-    return result;
-  }
-
-  if (targetLastCol !== backupLastCol) {
-    result.ok = false;
-    result.messages.push(`列数不一致: target=${targetLastCol}, backup=${backupLastCol}`);
-    return result;
-  }
-
-  if (targetNumRows === 0) return result;
-
-  const targetValues = target.getRange(startRow, 1, targetNumRows, targetLastCol).getValues();
-  const backupValues = backup.getRange(2, 1, backupNumRows, backupLastCol).getValues();
-
-  const targetMap = buildRowKeyMap_(targetValues);
-  const backupMap = buildRowKeyMap_(backupValues);
-
-  const backupKeys = Object.keys(backupMap);
-
-  for (const key of backupKeys) {
-    if (!(key in targetMap)) {
-      result.ok = false;
-      result.messages.push('行が見つかりません: ' + key);
-      continue;
-    }
-
-    const targetRow = JSON.stringify(normalizeRowForCompare_(targetMap[key]));
-    const backupRow = JSON.stringify(normalizeRowForCompare_(backupMap[key]));
-
-    if (targetRow !== backupRow) {
-      result.ok = false;
-      result.messages.push('横ずれ検知: ' + key);
-    }
-  }
-
-  return result;
-}
-
-function recoverIfPreviousRunCrashed_(ss) {
-  const props = PropertiesService.getScriptProperties();
-  const running = props.getProperty('ROW_INTEGRITY_RUNNING');
-
-  if (running !== '1') return;
-
-  Logger.log('前回異常終了の可能性あり。復旧確認を開始');
-
-  const result = verifySheetAgainstBackup_(ss, '営業先リスト/新規', '営業先リスト_復元用', 2);
-
-  if (!result.ok) {
-    restoreSheetBackup_(ss, '営業先リスト_復元用', '営業先リスト/新規', 2);
-    Logger.log('前回異常終了後の復旧を実施');
-  } else {
-    Logger.log('前回異常終了フラグは残っていたが、整合性は問題なし');
-  }
-
-  clearProcessRunning_();
-}
-
 // ===== メニュー（既存＋時間報メニュー） =====
 function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-
-  // ▼ 「メニュー」：営業系（元の処理はそのまま残す）
-  ui.createMenu('メニュー')
-    .addItem('★今日の攻め先を更新', '今日の攻め先_更新')
-  　.addItem('新規リフレッシュ', 'runAllSafe_Final')
+  SpreadsheetApp.getUi().createMenu('メニュー')
+    .addItem('新規リフレッシュ', 'runAllSafe_Final')
     .addItem('リンク再生', 'runAllProcessesCombined')
     .addItem('今日の掛け先をハイライト', 'updateAllSheetsAndResetColors_Safe')
     .addItem('データ補正', 'processPhoneNumbers')
@@ -5746,7 +4645,6 @@ function onOpen() {
     .addItem('A〜D列を削除して左詰め', 'deleteABCD_andLeftShift')
     .addItem('繋がらなかった顧客を転記', 'runLavenderTransfer')
     .addToUi();
-
 }
 
 
@@ -5798,7 +4696,7 @@ function runAllSafe_Final() {
       applySort: false
     });
 
-    // fillBusinessDays があれば最後に実行
+    // 営業日補完（fillBusinessDays）
     runFillBusinessDaysSafely_();
 
     // ④ 一番最後にリンク再生成
@@ -5823,7 +4721,7 @@ function runLavenderTransfer() {
   if (!keisai || !sales || !hist) { SpreadsheetApp.getUi().alert('必要シートが見つかりません'); return; }
 
   const LABEL = 'キーマンと繋がってない';                  // 営業先/新規 L列(12)へ入れる
-  const up = s => String(s || '').toUpperCase();
+  const LAVENDER = '#E6E6FA';
   const tz = Session.getScriptTimeZone();
   const now = new Date();
   const ymd = Utilities.formatDate(now, tz, 'yyyy/MM/dd');
@@ -5831,95 +4729,60 @@ function runLavenderTransfer() {
 
   const lastRow = keisai.getLastRow();
   const lastCol = keisai.getLastColumn();
-  const salesCols = sales.getLastColumn();
-  const copyCols  = Math.min(lastCol, salesCols);
-
+  const copyCols = Math.min(lastCol, sales.getLastColumn());
   let count = 0;
 
-  // ---- 小ヘルパ ----
-  function isRowColor(row, hex) {
-    const colors = keisai.getRange(row, 1, 1, lastCol).getBackgrounds()[0];
-    return colors.length && colors.every(c => up(c) === up(hex));
-  }
-  function findRowByA(sh, name) {
-    const f = sh.getRange('A:A').createTextFinder(name).matchCase(true).matchEntireCell(true).findNext();
-    return f ? f.getRow() : 0;
-  }
-  function getOrInitStatus(val) {
-    const def = '午前中/0回 13-15時/0回 15-17時/0回 アポイント/0回';
-    let s = String(val || '').trim(); if (!s) return def;
-    ['午前中','13-15時','15-17時','アポイント'].forEach(l => { if (!new RegExp(l+'\\/\\d+回').test(s)) s += (s?' ':'')+l+'/0回'; });
-    return s;
-  }
-  function linkBoth(salesRow, histRow, company) {
-    const salesLink   = `=HYPERLINK("#gid=${hist.getSheetId()}&range=A${histRow}","${company}")`;
-    const historyLink = `=HYPERLINK("#gid=${sales.getSheetId()}&range=A${salesRow}","${company}")`;
-    try { sales.getRange(salesRow, 1).setFormula(salesLink); } catch(e) {}
-    try { hist.getRange(histRow, 1).setFormula(historyLink); } catch(e) {}
-  }
-  // 先頭の「yyyy/MM/dd HH時 - 」が 1回以上連なるのを全部削る
-  function stripLeadingDateHeader(s) {
-    return String(s || '').replace(/^(?:\d{4}\/\d{2}\/\d{2}\s+\d{2}時\s*-\s*)+/, '').trim();
-  }
+  if (lastRow >= 2 && lastCol >= 1) {
+    // 掲載開始顧客は1回でまとめて読む
+    const rng = keisai.getRange(2, 1, lastRow - 1, lastCol);
+    const bgs = rng.getBackgrounds();
+    const disp = rng.getDisplayValues();
+    const vals = rng.getValues();
 
-  // ---- 本処理 ----
-  for (let r = 2; r <= lastRow; r++) {
-    // 対象：薄紫(#E6E6FA)かつ未処理(≠#D3D3D3)
-    if (!isRowColor(r, '#E6E6FA') || isRowColor(r, '#D3D3D3')) continue;
+    for (let i = 0; i < bgs.length; i++) {
+      // 対象：行全体が薄紫（処理済みは灰色になっているので対象外）
+      if (!bgs[i].every(c => String(c || '').toUpperCase() === LAVENDER)) continue;
 
-    const company = String(keisai.getRange(r, 1).getDisplayValue() || '').trim();
-    if (!company) continue;
+      const company = String(disp[i][0] || '').trim();
+      if (!company) continue;
 
-    // 1) 会話本文素材：L列 > I列 > 定型
-    const Ltext = String(keisai.getRange(r, 12).getDisplayValue() || '').trim();
-    const Itext = String(keisai.getRange(r,  9).getDisplayValue() || '').trim();
-    const lastFromL = Ltext ? Ltext.split('\n').pop() : '';
-    // 二重ヘッダ除去してプレーン文に
-    let plain = stripLeadingDateHeader(lastFromL || Itext);
-    if (!plain) plain = '掲載開始顧客（薄紫）から自動転記';
-    const body = `${ymd} ${hh} - ${plain}`;
+      // 1) 会話本文：L列の最終行 > I列 > 定型（先頭の「yyyy/MM/dd HH時 - 」の重なりは削る）
+      const Ltext = String(disp[i][11] || '').trim();
+      const Itext = String(disp[i][8] || '').trim();
+      const plain = String((Ltext ? Ltext.split('\n').pop() : '') || Itext)
+        .replace(/^(?:\d{4}\/\d{2}\/\d{2}\s+\d{2}時\s*-\s*)+/, '').trim() || '掲載開始顧客（薄紫）から自動転記';
+      const body = `${ymd} ${hh} - ${plain}`;
 
-    // 2) 営業先/新規 Upsert（新規作成時のみ行コピー。ただし D・E 列は転記しない）
-    let salesRow = findRowByA(sales, company);
-    if (salesRow === 0) {
-      salesRow = sales.getLastRow() + 1;
-      const src = keisai.getRange(r, 1, 1, copyCols).getValues()[0]; // 1行分
-      // A～C を転記
-      sales.getRange(salesRow, 1, 1, Math.min(3, copyCols)).setValues([src.slice(0, Math.min(3, copyCols))]);
-      // F 以降を転記（D=4, E=5 は除外）
-      if (copyCols >= 6) {
-        sales.getRange(salesRow, 6, 1, copyCols - 5).setValues([src.slice(5, copyCols)]);
+      // 2) 営業先/新規 Upsert（新規作成時のみ行コピー。D・E 列は転記しない）
+      let salesRow = findRowInColA_(sales, company);
+      if (salesRow === 0) {
+        salesRow = sales.getLastRow() + 1;
+        const src = vals[i].slice(0, copyCols);
+        sales.getRange(salesRow, 1, 1, Math.min(3, copyCols)).setValues([src.slice(0, 3)]);
+        if (copyCols >= 6) sales.getRange(salesRow, 6, 1, copyCols - 5).setValues([src.slice(5)]);
       }
-    }
-    // L列(12)に「キーマンと繋がってない」をセット（上書き）
-    if (sales.getLastColumn() >= 12) {
-      sales.getRange(salesRow, 12).setValue(LABEL);
-    }
-    // N列(14)のステータス整形
-    if (sales.getLastColumn() >= 14) {
-      const nCell = sales.getRange(salesRow, 14);
-      nCell.setValue(getOrInitStatus(nCell.getValue()));
-    }
+      if (sales.getLastColumn() >= 12) sales.getRange(salesRow, 12).setValue(LABEL);
+      if (sales.getLastColumn() >= 14) {
+        const nCell = sales.getRange(salesRow, 14);
+        nCell.setValue(getOrInitStatus_(nCell.getValue()));
+      }
 
-    // 3) 会話履歴/新規 Upsert（B列は触らない・新規時も空欄）
-    let histRow = findRowByA(hist, company);
-    if (histRow > 0) {
-      const c = hist.getRange(histRow, 3);
-      const cur = String(c.getValue() || '');
-      const lastLine = cur ? cur.split('\n').pop() : '';
-      // 直前と同一なら追記しない
-      if (lastLine !== body) c.setValue((cur ? cur + '\n' : '') + body);
-    } else {
-      hist.appendRow([company, '', body]); // B列は空のまま
-      histRow = hist.getLastRow();
+      // 3) 会話履歴/新規 Upsert（B列は触らない・直前と同じ行なら追記しない）
+      let histRow = findRowInColA_(hist, company);
+      if (histRow > 0) {
+        const c = hist.getRange(histRow, 3);
+        const cur = String(c.getValue() || '');
+        if ((cur ? cur.split('\n').pop() : '') !== body) c.setValue((cur ? cur + '\n' : '') + body);
+      } else {
+        hist.appendRow([company, '', body]);
+        histRow = hist.getLastRow();
+      }
+
+      // 4) 相互リンク　5) 原票をグレー化（再実行防止）
+      createHyperlinks(sales, hist, salesRow, histRow, company);
+      keisai.getRange(i + 2, 1, 1, lastCol).setBackground('#D3D3D3');
+      count++;
     }
-
-    // 4) 相互リンク
-    linkBoth(salesRow, histRow, company);
-
-    // 5) 原票をグレー化（再実行防止）
-    keisai.getRange(r, 1, 1, lastCol).setBackground('#D3D3D3');
-    count++;
   }
 
   SpreadsheetApp.getUi().alert(`薄紫行の転記が完了しました：${count}件（履歴の二重ヘッダ防止、DE列は転記せず）`);
