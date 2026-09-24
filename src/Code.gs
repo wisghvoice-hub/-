@@ -5,7 +5,7 @@ const FIXED_HISTORY_LABEL = "Ⓒ1か月以内ニーズ有 × 選ばなそう";
 //================ onEdit ================
 // onEdit が反応するシート（それ以外の編集はすぐ終わる）
 const ONEDIT_SHEETS_ = new Set([
-  "掲載状況", "ホット", "掲載開始顧客", "新規ホット", "飛び込み先リスト", "メール管理",
+  "掲載状況", "掲載開始顧客", "新規ホット", "飛び込み先リスト", "メール管理",
   "営業先リスト/新規", "営業先リスト/現S", "会話履歴/新規", "会話履歴/現S"
 ]);
 
@@ -83,20 +83,6 @@ function onEdit(e) {
         return;
       }
 
-      case "ホット": {
-        //=== J(10)入力 → 会話履歴/新規 追記（B固定）＋架電/新規 C+1＋セルクリア
-        if (col !== 10 || !filled) return;
-        const company = sheet.getRange(row, 2).getValue();
-        if (!company) return;
-        const hist = ss.getSheetByName("会話履歴/新規");
-        const log = ss.getSheetByName("架電記録/新規");
-        if (!hist || !log) return;
-        appendHistory_(hist, company, memo(), FIXED_HISTORY_LABEL);
-        updateCallLog(log, ymd, 3); // C+1
-        clearCell();
-        return;
-      }
-
       case "掲載開始顧客": {
         //=== K(11)チェック → NGリスト追記＋行灰色
         if (col === 11) {
@@ -131,8 +117,8 @@ function onEdit(e) {
         else if (col === 6) setRowColorByFlag_(sheet, row, sheet.getLastColumn(), checked);
         //=== G(7)チェック → 架電記録/新規 C列+1
         else if (col === 7 && checked) countUp("架電記録/新規", 3);
-        //=== H(8)入力 → 架電記録/新規 D列+1
-        else if (col === 8 && filled) countUp("架電記録/新規", 4);
+        //=== H(8)チェック → 架電記録/新規 D列+1（チェックを外したときは数えない）
+        else if (col === 8 && checked) countUp("架電記録/新規", 4);
         //=== I(9)入力 → 営業先リスト/新規へ転記＋会話履歴へ追記＋相互リンク＋行グレー化
         else if (col === 9 && value !== "") upsertShinkiAndHistoryFromKeisai_(ss, sheet, row, ymd, tz);
         return;
