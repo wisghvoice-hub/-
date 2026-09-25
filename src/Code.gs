@@ -145,6 +145,11 @@ function onEdit(e) {
           const sales = ss.getSheetByName("営業先リスト/新規");
           const r = sales ? findRowInColA_(sales, keyA) : 0;
           if (r) sales.getRange(r, 9, 1, col === 9 ? 2 : 1).setValue(ymd); // Hチェック→I列 / Iチェック→I列とJ列
+          // Hチェック＝今日電話した → 記録して営業先リスト/新規の行を薄紫（G列に値があれば黄緑）に
+          if (col === 8) {
+            markCalledToday_(keyA, ymd);
+            if (r) updateRowColor(sales, r, sales.getLastColumn());
+          }
           return;
         }
         //=== G(7)チェック → TRUE:緑 / FALSE:薄紫
